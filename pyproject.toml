@@ -1,0 +1,9 @@
+[project.scripts]
+tsprep-download = "tsprep.data_preprocessing.download:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["tsprep*"]
+
+[tool.setuptools.package-data]
+tsprep = ["*.py"]
