@@ -1,12 +1,4 @@
-"""
-Базовые строительные блоки: каузальная дилатированная свертка (TCN),
-позиционное кодирование для трансформера.
-
-Формулы соответствуют гл. 1.2 / 2.2 отчета:
-  y_t^(i) = sum_{k=0}^{K-1} w_k^(i) * x^(i-1)_{t - d_i * k}
-  d_i = 2^i (экспоненциальный рост дилатации)
-  skip: o^(i) = ReLU(Conv(x^(i-1)) + x^(i-1))
-"""
+"""Каузальные дилатированные свёртки и синусоидальное позиционное кодирование."""
 import math
 
 import torch
@@ -90,4 +82,11 @@ class PositionalEncoding(nn.Module):
 
     def forward(self, x):
         # x: (B, T, d_model)
+        if x.size(1) > self.pe.size(1):
+            position = torch.arange(x.size(1), device=x.device, dtype=x.dtype).unsqueeze(1)
+            div = torch.exp(torch.arange(0, x.size(2), 2, device=x.device, dtype=x.dtype) * (-math.log(10000.) / x.size(2)))
+            pe = x.new_zeros(1, x.size(1), x.size(2))
+            pe[0, :, 0::2] = torch.sin(position * div)
+            pe[0, :, 1::2] = torch.cos(position * div[:pe[:, :, 1::2].size(2)])
+            return x + pe
         return x + self.pe[:, : x.size(1)] # type: ignore

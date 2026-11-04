@@ -1,25 +1,4 @@
-"""
-Загрузка реальных экономических данных из CSV.
-
-Синтетика (``synthetic.py``) нужна для отладки пайплайна без
-интернета. Для реальных экспериментов положите файл с историческими
-котировками/курсами (например, выгруженный локально через
-``yfinance``, Investing.com export, ЦБ РФ и т.п. - в этом окружении
-сетевой доступ к финансовым API закрыт) в ``data/raw/`` и укажите
-путь и колонки здесь.
-
-Ожидаемый формат CSV: колонка с датой (по умолчанию 'Date') и одна
-или несколько числовых колонок-признаков (например 'Close', 'Volume').
-Строки должны быть УЖЕ отсортированы по возрастанию даты - функция
-это проверяет и явно падает, если нет (тихая пересортировка была бы
-опаснее: лучше пользователю увидеть ошибку и разобраться с источником).
-
-Дополнительно: загрузка внешней бинарной/категориальной разметки
-(например, FRED ``USREC`` - индикатор рецессии NBER) и её выравнивание
-по датам ценового ряда - для downstream-задачи КЛАССИФИКАЦИИ эмбеддингов
-(гл. 3.3 отчёта, "Уровень 2: полезность эмбеддингов"). Метка не участвует
-в обучении автоэнкодера - только в оценке качества латентного пространства.
-"""
+"""Загрузка CSV с возрастающими датами и выравнивание внешних меток."""
 import numpy as np
 import pandas as pd
 
@@ -45,7 +24,7 @@ def load_csv_series_with_dates(
     if date_col not in df.columns:
         raise ValueError(f"Column '{date_col}' not found in {path}. Columns: {list(df.columns)}")
     dates = pd.to_datetime(df[date_col])
-    if not dates.is_monotonic_increasing:
+    if dates.isna().any() or dates.duplicated().any() or not dates.is_monotonic_increasing:
         raise ValueError(
             f"Column '{date_col}' is not sorted ascending - sort the CSV by date "
             "before loading (chronological order is required for this pipeline)."
@@ -54,9 +33,11 @@ def load_csv_series_with_dates(
         value_cols = [c for c in df.columns if c != date_col and pd.api.types.is_numeric_dtype(df[c])]
         if not value_cols:
             raise ValueError("No numeric value columns found; pass value_cols explicitly.")
+    if not value_cols or len(set(value_cols)) != len(value_cols):
+        raise ValueError("Select a nonempty list of unique feature columns")
     values = df[value_cols].to_numpy(dtype=float)
-    if np.isnan(values).any():
-        n_nan = int(np.isnan(values).sum())
+    if not np.isfinite(values).all():
+        n_nan = int((~np.isfinite(values)).sum())
         raise ValueError(
             f"CSV contains {n_nan} NaN values in {value_cols}. "
             "Fill or drop them before loading (e.g. df.ffill())."
@@ -66,24 +47,18 @@ def load_csv_series_with_dates(
 
 def load_label_series(
     path: str,
-    date_col: str = "DATE",
+    date_col: str = "observation_date",
     label_col: str = "USREC",
 ) -> tuple:
-    """
-    Загружает внешнюю разметку с собственной (обычно более редкой)
-    частотой дискретизации - например, ежемесячный индикатор рецессии
-    NBER из FRED (https://fred.stlouisfed.org/series/USREC): колонки
-    ``DATE`` и ``USREC`` (0/1).
-
-    Возвращает (dates, labels) - БЕЗ выравнивания по ценовому ряду,
-    это делает ``align_labels_to_dates``.
-    """
+    """Возвращает даты и значения внешней разметки, отсортированные по дате."""
     df = pd.read_csv(path)
     if date_col not in df.columns or label_col not in df.columns:
         raise ValueError(f"Expected columns '{date_col}' and '{label_col}' in {path}. "
                           f"Got: {list(df.columns)}")
     dates = pd.to_datetime(df[date_col])
     labels = df[label_col].to_numpy()
+    if dates.isna().any() or dates.duplicated().any() or not np.isfinite(labels.astype(float)).all():
+        raise ValueError("Invalid or duplicate label dates / missing labels")
     order = np.argsort(dates.to_numpy())
     return dates.to_numpy()[order], labels[order]
 
@@ -93,23 +68,19 @@ def align_labels_to_dates(
     label_dates: np.ndarray,
     label_values: np.ndarray,
 ) -> np.ndarray:
-    """
-    Выравнивает более редкую разметку (например, ежемесячный USREC) на
-    даты ценового ряда (например, ежедневного) методом "последнее
-    известное значение" (forward-fill): для каждой даты ценового ряда
-    берётся последнее значение метки, известное не позже этой даты -
-    то есть без заглядывания в будущее (важно для честной оценки).
+    """Сопоставляет последнюю метку с датой не позже даты наблюдения.
 
-    Даты ценового ряда РАНЬШЕ первой даты разметки получают значение
-    первой доступной метки (нет альтернативы без будущего knowledge).
+    До первой метки возвращает NaN. Даты USREC обозначают периоды,
+    а не публикации; метки используются ретроспективно.
     """
     label_df = pd.DataFrame({"date": pd.to_datetime(label_dates), "label": label_values}).sort_values("date")
-    value_df = pd.DataFrame({"date": pd.to_datetime(value_dates)}).sort_values("date")
+    if len(label_dates) != len(label_values) or not len(label_dates):
+        raise ValueError("Invalid label arrays")
+    if label_df["date"].duplicated().any() or label_df["date"].isna().any():
+        raise ValueError("Invalid label dates")
+    value_df = pd.DataFrame({"date": pd.to_datetime(value_dates), "position": np.arange(len(value_dates))}).sort_values("date")
     merged = pd.merge_asof(value_df, label_df, on="date", direction="backward")
-    if merged["label"].isna().any():
-        # значения ценового ряда раньше первой даты метки - заполняем первой известной меткой
-        merged["label"] = merged["label"].bfill()
-    return merged["label"].to_numpy()
+    return merged.sort_values("position")["label"].to_numpy()
 
 
 def load_series_with_recession_labels(
@@ -117,16 +88,11 @@ def load_series_with_recession_labels(
     label_path: str,
     price_date_col: str = "Date",
     value_cols: list[str] | None = None,
-    label_date_col: str = "DATE",
+    label_date_col: str = "observation_date",
     label_col: str = "USREC",
 ) -> dict:
-    """
-    Готовый конвейер для сценария "S&P 500 (или любой ценовой ряд) +
-    метка рецессии NBER/FRED USREC": загружает оба CSV, выравнивает
-    метку на даты ценового ряда, возвращает всё, что нужно для
-    prepare_and_window(..., regime=...) и downstream-классификации
-    """
+    """Загружает ценовой ряд и выравнивает метки рецессии по его датам."""
     dates, values, cols = load_csv_series_with_dates(price_path, price_date_col, value_cols)
     label_dates, label_values = load_label_series(label_path, label_date_col, label_col)
-    aligned_labels = align_labels_to_dates(dates, label_dates, label_values).astype(int)
+    aligned_labels = align_labels_to_dates(dates, label_dates, label_values)
     return {"dates": dates, "values": values, "value_cols": cols, "labels": aligned_labels}

@@ -1,15 +1,4 @@
-"""
-Функции потерь и планировщик KL-annealing
-
-L_VAE = L_recon + beta * D_KL(q(z|x) || N(0, I))
-
-D_KL(N(mu,sigma^2) || N(0,1)) = -0.5 * sum(1 + logvar - mu^2 - exp(logvar))
-
-beta растет линейно от 0 до beta_target в течение kl_anneal_epochs -
-это стандартный прием против "коллапса апостериорного распределения"
-(posterior collapse), когда модель игнорирует z и декодер работает
-как обычный AE
-"""
+"""Потери реконструкции, KL-дивергенция и линейный разогрев beta."""
 import torch
 import torch.nn.functional as F
 
@@ -33,9 +22,11 @@ class KLAnnealer:
 
     def __init__(self, beta_target: float, kl_anneal_epochs: int):
         self.beta_target = beta_target
-        self.kl_anneal_epochs = max(1, kl_anneal_epochs)
+        self.kl_anneal_epochs = kl_anneal_epochs
 
     def beta(self, epoch: int) -> float:
+        if self.kl_anneal_epochs == 0:
+            return self.beta_target
         return self.beta_target * min(1.0, epoch / self.kl_anneal_epochs)
 
 

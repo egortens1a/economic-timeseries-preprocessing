@@ -1,151 +1,163 @@
-"""
-Downstream-задачи оценки качества латентного представления
-  1) Прогнозирование: линейная регрессия z_t -> y_{t+H} (простая,
-     "слабая" голова - если ДАЖЕ линейная модель на эмбеддингах
-     показывает низкую ошибку, значит эмбеддинг несёт релевантную
-     информацию о будущей динамике).
-  2) Кластеризация: silhouette score эмбеддингов относительно скрытых
-     рыночных режимов (в реальных данных - относительно kmeans-меток,
-     если истинные режимы неизвестны).
-  3) Обнаружение аномалий: композитный скор s(x) = recon_error + λ·KL,
-     F1 относительно внесённых точечных аномалий.
-"""
+"""Downstream probes and validation-only anomaly calibration."""
 import numpy as np
 from sklearn.cluster import KMeans
-from sklearn.linear_model import LinearRegression, LogisticRegression
-from sklearn.metrics import (accuracy_score, f1_score, mean_absolute_error,
-                              roc_auc_score, silhouette_score)
+from sklearn.linear_model import Ridge, LogisticRegression
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import (accuracy_score, balanced_accuracy_score, f1_score,
+    mean_absolute_error, r2_score, roc_auc_score, silhouette_score, average_precision_score,
+    precision_score, recall_score)
 
 
-def forecast_via_linear_probe(
-    z_train: np.ndarray, y_train: np.ndarray,
-    z_test: np.ndarray, y_test: np.ndarray,
-) -> dict:
-    """
-    Линейный "зонд" (linear probe) на замороженных эмбеддингах:
-    обучаем LinearRegression(z -> y) и меряем MAE на тесте.
-    """
-    reg = LinearRegression().fit(z_train, y_train)
-    y_pred = reg.predict(z_test)
-    return {
-        "mae": float(mean_absolute_error(y_test, y_pred)),
-        "r2": float(reg.score(z_test, y_test)),
-    }
+def regression_report(y, pred):
+    return dict(mae=float(mean_absolute_error(y, pred)), r2=float(r2_score(y, pred)) if len(y)>1 else None)
 
 
-def classify_via_linear_probe(
-    z_train: np.ndarray, y_train: np.ndarray,
-    z_test: np.ndarray, y_test: np.ndarray,
-    class_weight: str | None = "balanced",
-) -> dict:
-    """
-    Линейный классификатор на замороженных эмбеддингах для предсказания классов,
-    например рецессий NBER. По умолчанию используется балансировка классов.
-    Для расчёта метрик в train и test нужны оба класса; иначе возвращаются None и пояснение в note.
-    """
-    classes_train = np.unique(y_train)
-    classes_test = np.unique(y_test)
-    if len(classes_train) < 2:
-        return {"accuracy": None, "f1": None, "roc_auc": None,
-                "note": f"only one class in train ({classes_train}) - probe not fitted"}
-    if len(classes_test) < 2:
-        # обучить можно, но ROC-AUC на одном классе не определён
-        clf = LogisticRegression(max_iter=1000, class_weight=class_weight).fit(z_train, y_train)
-        y_pred = clf.predict(z_test)
-        return {"accuracy": float(accuracy_score(y_test, y_pred)),
-                "f1": float(f1_score(y_test, y_pred, zero_division=0)),
-                "roc_auc": None,
-                "note": f"only one class in test ({classes_test}) - roc_auc undefined"}
-
-    clf = LogisticRegression(max_iter=1000, class_weight=class_weight).fit(z_train, y_train)
-    y_pred = clf.predict(z_test)
-    y_proba = clf.predict_proba(z_test)[:, 1]
-    return {
-        "accuracy": float(accuracy_score(y_test, y_pred)),
-        "f1": float(f1_score(y_test, y_pred, zero_division=0)),
-        "roc_auc": float(roc_auc_score(y_test, y_proba)),
-        "note": None,
-        "positive_rate_train": float(y_train.mean()),
-        "positive_rate_test": float(y_test.mean()),
-    }
+def forecast_via_linear_probe(z_train, y_train, z_test, y_test, *, z_val=None, y_val=None):
+    candidates = [0.1, 1., 10., 100.]
+    if z_val is None:
+        candidates = [1.]
+    best, score, alpha = None, float("inf"), None
+    for a in candidates:
+        reg = make_pipeline(StandardScaler(), Ridge(alpha=a)).fit(z_train, y_train)
+        value = mean_absolute_error(y_val, reg.predict(z_val)) if z_val is not None else 0.
+        if value < score:
+            best, score, alpha = reg, value, a
+    return {**regression_report(y_test, best.predict(z_test)), "ridge_alpha": alpha,
+            "validation_mae": float(score) if z_val is not None else None}
 
 
-def window_class_labels(labels: np.ndarray, window_len: int, stride: int, n_windows: int,
-                         rule: str = "last") -> np.ndarray:
-    """
-    Сворачивает поточечную разметку в метку на уровне окна
+def binary_report(y, pred, scores=None):
+    y, pred = np.asarray(y), np.asarray(pred)
+    if y.shape != pred.shape or not np.isin(y, [0, 1]).all() or not len(y):
+        raise ValueError("binary labels and predictions must have equal nonempty shape")
+    both = len(np.unique(y)) == 2
+    n_positive, n_negative = int(y.sum()), int((y==0).sum())
+    return dict(accuracy=float(accuracy_score(y, pred)),
+        f1=float(f1_score(y, pred, zero_division=0)) if n_positive else None,
+        precision=float(precision_score(y, pred, zero_division=0)),
+        recall=float(recall_score(y, pred, zero_division=0)) if n_positive else None,
+        balanced_accuracy=float(balanced_accuracy_score(y, pred)) if both else None,
+        roc_auc=float(roc_auc_score(y, scores)) if both and scores is not None else None,
+        pr_auc=float(average_precision_score(y, scores)) if both and scores is not None else None,
+        false_positive_rate=float(pred[y==0].mean()) if n_negative else None,
+        positive_rate_test=float(y.mean()), n_positive=n_positive, n_negative=n_negative,
+        note=None if both else "single-class evaluation; sensitivity or specificity is not identifiable")
 
-    rule='last'     - метка последнего шага окна (соответствует тому,
-                       что энкодер видит "к моменту принятия решения");
-    rule='majority'  - метка большинства точек внутри окна.
-    """
-    out = np.zeros(n_windows, dtype=int)
-    for k, start in enumerate(range(0, n_windows * stride, stride)):
-        window_labels = labels[start:start + window_len]
-        if rule == "last":
-            out[k] = window_labels[-1]
-        elif rule == "majority":
-            out[k] = int(np.round(window_labels.mean()))
+
+def classify_via_linear_probe(z_train, y_train, z_test, y_test, class_weight="balanced"):
+    tr_ok, te_ok = np.isfinite(y_train), np.isfinite(y_test)
+    z_train, y_train = z_train[tr_ok], y_train[tr_ok]
+    z_test, y_test = z_test[te_ok], y_test[te_ok]
+    if not np.isin(y_train, [0, 1]).all() or not np.isin(y_test, [0, 1]).all():
+        raise ValueError("classification probe supports binary targets only")
+    if len(np.unique(y_train)) < 2 or not len(y_test):
+        return dict(accuracy=None, f1=None, roc_auc=None, pr_auc=None, note="insufficient labelled classes")
+    clf = make_pipeline(StandardScaler(), LogisticRegression(max_iter=2000, class_weight=class_weight))
+    clf.fit(z_train, y_train)
+    scores = clf.predict_proba(z_test)[:, 1]
+    return {**binary_report(y_test, (scores >= .5).astype(int), scores),
+            "positive_rate_train": float(y_train.mean()), "target": "retrospective_label_at_window_end"}
+
+
+def _label_windows(labels, window_len, stride, n_windows):
+    if min(window_len, stride, n_windows) < 1 or (n_windows-1)*stride+window_len > len(labels):
+        raise ValueError("label length does not match windows")
+    return [np.asarray(labels)[i*stride:i*stride+window_len] for i in range(n_windows)]
+
+
+def window_class_labels(labels, window_len, stride, n_windows, rule="last"):
+    windows = _label_windows(labels, window_len, stride, n_windows)
+    if rule == "last":
+        return np.asarray([w[-1] for w in windows])
+    if rule != "majority":
+        raise ValueError("Unknown window label rule")
+    result = []
+    for w in windows:
+        if not np.isfinite(w).all():
+            result.append(np.nan)
         else:
-            raise ValueError(f"Unknown rule: {rule}")
-    return out
+            values, counts = np.unique(w, return_counts=True)
+            winners = values[counts == counts.max()]
+            result.append(w[-1] if w[-1] in winners else winners[0])
+    return np.asarray(result)
 
 
-def clustering_quality(z: np.ndarray, labels: np.ndarray | None = None, n_clusters: int = 3) -> dict:
-    """
-    Silhouette score латентных представлений. Если истинные метки режима
-    заданы (синтетика) - используем их напрямую; иначе кластеризуем
-    KMeans'ом и считаем silhouette по полученным кластерам.
-    """
-    if z.shape[0] > 5000:
-        # для скорости считаем silhouette на случайной подвыборке
-        rng = np.random.default_rng(0)
-        idx = rng.choice(z.shape[0], size=5000, replace=False)
-        z_sub = z[idx]
-        labels_sub = labels[idx] if labels is not None else None
-    else:
-        z_sub, labels_sub = z, labels
-
-    if labels_sub is not None and len(np.unique(labels_sub)) > 1:
-        score = silhouette_score(z_sub, labels_sub)
-        return {"silhouette": float(score), "label_source": "true_regime"}
-
-    km = KMeans(n_clusters=n_clusters, n_init=10, random_state=0).fit(z_sub)
-    score = silhouette_score(z_sub, km.labels_)
-    return {"silhouette": float(score), "label_source": "kmeans"}
-
-
-def anomaly_detection_f1(
-    x: np.ndarray, x_hat: np.ndarray, is_anomaly_window: np.ndarray,
-    z: np.ndarray | None = None, kl_per_window: np.ndarray | None = None,
-    lam: float = 0.1,
-) -> dict:
-    """
-    Скор аномальности окна: 
-    s(x) = ||X - X_hat||_2 (+ lambda * KL, если задан).
-    Порог выбирается по квантилю этих же скоров без использования тестовых меток;
-    метки применяются только для расчёта итоговой F1.
-    """
-    recon_err = np.mean((x - x_hat) ** 2, axis=(1, 2))
-    score = recon_err if kl_per_window is None else recon_err + lam * kl_per_window
-
-    best_f1, best_thr = 0.0, None
-    for q in np.linspace(0.80, 0.999, 60):
-        thr = np.quantile(score, q)
-        pred = (score > thr).astype(int)
-        f1 = f1_score(is_anomaly_window, pred, zero_division=0)
-        if f1 > best_f1:
-            best_f1, best_thr = f1, thr
-
-    return {"f1": float(best_f1), "threshold": float(best_thr) if best_thr is not None else None,
-            "anomaly_rate_true": float(is_anomaly_window.mean())}
+def clustering_quality(z, labels=None, n_clusters=3):
+    z = np.asarray(z)
+    source = "true_regime" if labels is not None else "kmeans"
+    if z.ndim != 2 or not np.isfinite(z).all():
+        raise ValueError("invalid embeddings")
+    if labels is not None:
+        labels = np.asarray(labels)
+        if labels.shape != (len(z),):
+            raise ValueError("labels must match embeddings")
+        valid = np.isfinite(labels)
+        z, labels = z[valid], labels[valid]
+    if len(z) > 2000:
+        idx = np.random.default_rng(0).choice(len(z), 2000, replace=False)
+        z, labels = z[idx], None if labels is None else labels[idx]
+    if labels is None and len(z)>n_clusters and len(np.unique(z, axis=0))>=n_clusters:
+        labels = KMeans(n_clusters=n_clusters, n_init=10, random_state=0).fit_predict(z)
+    groups = 0 if labels is None else len(np.unique(labels))
+    if not 2 <= groups < len(z):
+        return dict(silhouette=None, label_source=source, n_clusters=groups,
+                    note="silhouette requires 2..N-1 nonempty groups; no fallback to another task")
+    return dict(silhouette=float(silhouette_score(z, labels)), label_source=source,
+                n_clusters=groups, note=None)
 
 
-def window_anomaly_labels(is_anomaly: np.ndarray, window_len: int, stride: int, n_windows: int) -> np.ndarray:
-    """Окно считается аномальным, если внутри него есть хотя бы одна
-    внесённая точечная аномалия"""
-    labels = np.zeros(n_windows, dtype=int)
-    for k, start in enumerate(range(0, n_windows * stride, stride)):
-        if is_anomaly[start:start + window_len].any():
-            labels[k] = 1
-    return labels
+def anomaly_scores(x, x_hat, kl_per_window=None, lam=0.):
+    if x.shape != x_hat.shape or x.ndim != 3 or lam < 0:
+        raise ValueError("invalid reconstruction or KL weight")
+    score = np.mean((x-x_hat)**2, axis=(1, 2))
+    if kl_per_window is not None:
+        if np.asarray(kl_per_window).shape != score.shape:
+            raise ValueError("KL shape mismatch")
+        score = score + lam*np.asarray(kl_per_window)
+    if not np.isfinite(score).all():
+        raise ValueError("nonfinite anomaly scores")
+    return score
+
+
+def calibrate_threshold(validation_scores, *, quantile=.95, validation_labels=None):
+    scores = np.asarray(validation_scores)
+    if scores.ndim != 1 or not len(scores) or not np.isfinite(scores).all() or not 0 < quantile < 1:
+        raise ValueError("invalid calibration scores/quantile")
+    if validation_labels is None:
+        return float(np.quantile(scores, quantile))
+    labels = np.asarray(validation_labels)
+    if labels.shape != scores.shape or not np.isin(labels, [0, 1]).all() or len(np.unique(labels)) < 2:
+        raise ValueError("supervised calibration needs both classes in validation")
+    thresholds = np.unique(np.quantile(scores, np.linspace(0, 1, 101)))
+    # Include an all-positive rule; ties prefer the more conservative threshold.
+    thresholds = np.r_[np.nextafter(scores.min(), -np.inf), thresholds]
+    values = [f1_score(labels, scores>t, zero_division=0) for t in thresholds]
+    return float(thresholds[np.flatnonzero(values == np.max(values))[-1]])
+
+
+def anomaly_detection_f1(x, x_hat, is_anomaly_window, *, threshold, kl_per_window=None, lam=0.):
+    if not np.isfinite(threshold):
+        raise ValueError("fixed finite validation-calibrated threshold required")
+    scores = anomaly_scores(x, x_hat, kl_per_window, lam)
+    labels = np.asarray(is_anomaly_window)
+    report = binary_report(labels, (scores>threshold).astype(int), scores)
+    return {**report, "threshold": float(threshold), "anomaly_rate_true": float(labels.mean()),
+            "predicted_positive_rate": float((scores>threshold).mean())}
+
+
+def window_anomaly_labels(is_anomaly, window_len, stride, n_windows):
+    return np.asarray([int(w.any()) for w in _label_windows(is_anomaly, window_len, stride, n_windows)])
+
+
+def event_report(labels, predictions):
+    """Event recall counts contiguous labelled episodes, not overlapping windows."""
+    labels, predictions = np.asarray(labels, bool), np.asarray(predictions, bool)
+    if labels.shape != predictions.shape:
+        raise ValueError("event arrays mismatch")
+    boundaries = np.flatnonzero(np.diff(np.r_[False, labels, False].astype(int)))
+    events = list(zip(boundaries[::2], boundaries[1::2]))
+    detected = sum(predictions[a:b].any() for a,b in events)
+    return dict(n_events=len(events), detected_events=int(detected),
+                event_recall=float(detected/len(events)) if events else None,
+                false_positive_points=int((predictions & ~labels).sum()))

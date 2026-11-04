@@ -1,14 +1,4 @@
-"""
-Энкодеры X (B,T,F) -> z (B,d_z), либо (mu, logvar) для VAE-варианта.
-
-Реализованы все архитектуры, сравниваемые в отчете (гл. 2, 3.3):
-  - TCNEncoder            (backbone: каузальный TCN)
-  - LSTMEncoder            (backbone: многослойный LSTM)
-  - TransformerEncoder     (backbone: self-attention энкодер)
-  - HybridTCNAttentionEncoder - предложенная модель: TCN извлекает
-    локальные многомасштабные признаки, self-attention поверх них
-    моделирует глобальные зависимости (гл. 1.3 / 2.3 отчета).
-"""
+"""Энкодеры окон (B,T,F) в z или параметры распределения (mu, logvar)."""
 import torch
 import torch.nn as nn
 
@@ -85,13 +75,7 @@ class TransformerEncoder(nn.Module):
 
 
 class HybridTCNAttentionEncoder(nn.Module):
-    """
-    Предложенная модель (гл. 1.3, 2.3 отчета): TCN как экстрактор
-    локальных многомасштабных признаков + multi-head self-attention
-    поверх последовательности TCN-признаков для захвата долгосрочных
-    зависимостей, которые ограниченный receptive field TCN не видит
-    напрямую.
-    """
+    """TCN-признаки с self-attention и обучаемым пулингом по времени."""
 
     def __init__(self, n_features, hidden_dim, latent_dim, n_levels, kernel_size,
                  n_heads, n_attn_layers, dropout, variational):
