@@ -1,9 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tsprep"
+version = "0.2.0"
+description = "Reproducible temporal representation learning experiments"
+requires-python = ">=3.10"
+dependencies = [
+  "torch>=2.2", "numpy>=1.26", "pandas>=2.0",
+  "scikit-learn>=1.4", "matplotlib>=3.8"
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+download = ["yfinance>=0.2"]
+notebook = ["jupyter>=1.0"]
+
 [project.scripts]
 tsprep-download = "tsprep.data_preprocessing.download:main"
+tsprep-experiment = "tsprep.cli:main"
+tsprep-study = "tsprep.study:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["tsprep*"]
 
-[tool.setuptools.package-data]
-tsprep = ["*.py"]
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
