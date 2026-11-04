@@ -1,98 +1,189 @@
 # tsprep
 
-Реализация моделей предобработки временных рядов на основе нейросетевых
-методов для экономических данных.
-
-## Структура проекта
-
-```
-tsprep/
-├── requirements.txt
-├── src/tsprep/
-│   ├── config.py                # DataConfig, ModelConfig, TrainConfig (все гиперпараметры)
-│   ├── data_preprocessing/
-│   │   ├── synthetic.py         # генератор синтетических экон. рядов (тренд+сезон+GARCH+режимы)
-│   │   ├── preprocessing.py     # детрендирование + Z-нормализация (train-fit)
-│   │   ├── datasets.py          # хронологический сплит, скользящее окно, DataLoader'ы
-│   │   └── loaders.py           # загрузка реальных данных из CSV
-│   ├── models/
-│   │   ├── layers.py            # CausalConv1d/TemporalBlock (TCN), PositionalEncoding
-│   │   ├── encoders.py          # TCNEncoder, LSTMEncoder, TransformerEncoder, HybridTCNAttentionEncoder
-│   │   ├── decoders.py          # TCNDecoder, LSTMDecoder, TransformerDecoder
-│   │   └── autoencoder.py       # Autoencoder/VAE-обертка + build_model(...) фабрика
-│   ├── mlcore/
-│   │   ├── losses.py            # recon loss, KL, KLAnnealer
-│   │   └── trainer.py           # train_model(...): AdamW, grad clip, early stopping
-│   └── evaluation/
-│       ├── reconstruction.py    # MSE/MAE/R2, сбор эмбеддингов
-│       ├── downstream.py        # linear probe (прогноз), silhouette, anomaly F1
-│       ├── latent.py            # коэффициент коллапса $\mu$, PCA/t-SNE
-│       └── visualize.py         # графики: кривые обучения, реконструкции, латентные проекции
-├── scripts/
-│   └── run_experiment.py        # CLI: полный прогон одной модели "данные -> метрики"
-└── notebooks/
-    ├── 01_data_preparation.ipynb
-    ├── 02_model_zoo_smoke_test.ipynb
-    ├── 03_training_and_comparison.ipynb
-    └── 04_evaluation_and_results.ipynb
-```
+НИР по обучению представлений экономических временных рядов: TCN, LSTM,
+Transformer и TCN+Attention. Исследуются сжатие окна и полезность эмбеддинга.
+Реконструкция шумного входа сама по себе не доказывает шумоподавление.
 
 ## Установка
 
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-pip install -e .
+Python 3.10+, PowerShell, запуск из корня проекта:
+
+```powershell
+python -m venv .venv
+.venv/Scripts/python.exe -m pip install -e .
+# Необязательные инструменты:
+.venv/Scripts/python.exe -m pip install -e ".[dev,download,notebook]"
 ```
 
-## Быстрый запуск одного эксперимента
+Runtime-зависимости: `reqs.txt`. Точные версии исследования:
+`results/<study>/environment.txt`.
 
-```bash
-python scripts/run_experiment.py --model hybrid_vae --epochs 40
-python scripts/run_experiment.py --model tcn_ae --data csv --csv-path data/raw/my_series.csv
+## Запуск
+
+```powershell
+.venv/Scripts/python.exe -m tsprep.cli --model hybrid_vae --epochs 40
+.venv/Scripts/python.exe -m tsprep.cli --data csv --csv-path data/raw/aapl.csv --columns "Adj Close" --model tcn_ae
+.venv/Scripts/python.exe -m tsprep.study --out results/my_new_study --epochs 30
+.venv/Scripts/python.exe -m tsprep.cli --evaluate results/my_new_study/aapl/fold_0/tcn_ae_seed42_beta0
 ```
 
-Результат (метрики реконструкции, forecast MAE, silhouette, anomaly F1,
-коэффициент коллапса $\mu$) печатается в консоль и сохраняется в
-`results/single_run.json`.
+`--out` — новый каталог, не JSON-файл. Одиночный эксперимент не
+перезаписывается. Исследование можно продолжить с теми же аргументами,
+если протокол и исходники совпадают. Незавершённый отдельный артефакт
+требует проверки причины сбоя.
 
-## Реализованные архитектуры (сравниваются в ноутбуке 03/04)
+Совместимый путь: `python scripts/run_experiment.py`.
+После установки доступны `tsprep-experiment`, `tsprep-study`,
+`tsprep-download`. Для VAE epochs должен превышать warmup (по умолчанию 5).
+Используется GPU, если доступен; `--device cpu` выбирает CPU.
+Ноутбуки 01–04 используют те же функции пакета.
 
-| model_name        | Энкодер              | Декодер      | VAE |
-|--------------------|----------------------|--------------|-----|
-| `tcn_ae`           | TCN                  | TCN          | нет |
-| `tcn_vae`          | TCN                  | TCN          | да  |
-| `lstm_ae`          | LSTM                 | LSTM (autoregressive) | нет |
-| `lstm_vae`         | LSTM                 | LSTM (autoregressive) | да  |
-| `transformer_ae`   | Transformer encoder  | Transformer (non-autoregressive) | нет |
-| `hybrid_vae`        | **TCN + self-attention (предложенная модель)** | TCN | да  |
+Новые запуски используют формат v3 и строгий `--deterministic` по умолчанию.
+TCN/Hybrid сохраняют линейную интерполяцию через фиксированную матрицу: это
+избегает недетерминированного CUDA backward у `F.interpolate`. Строгий режим
+проверен парными обучениями AE/VAE на CPU и CUDA; равенство между устройствами
+или разными версиями библиотек не обещается. `--no-deterministic` явно отключает
+строгую проверку операций.
+
+В CLI `--data-seed` (по умолчанию 2026), `--model-seed` (`--seed`) и
+`--loader-seed` разделены. Последний по умолчанию равен model seed.
+В study `--data-seed` фиксирован между initialization repeats `--seeds`.
+
+Продолжение v3 требует совпадения входов, меток, признаков, конфигурации,
+вычислительных исходников и окружения. Study сохраняет неизменяемые snapshots,
+архив кода, baseline receipts и связанные с весами metrics receipts. Во время
+работы обновляется `progress.csv`; итоговые таблицы публикуются целиком перед
+проверяемым `complete.json`. Завершённое исследование при resume проверяется
+и возвращается без пересборки частичной таблицы. Одновременную запись блокирует
+`.writer.lock`; после аварийного завершения процесса перед удалением оставшегося
+lock нужно проверить записанные PID и host.
+
+Исторические v2 study не продолжаются новым кодом. Их оценка требует явного
+разрешения несовпадения исходников и сохраняет прежнюю интерполяцию:
+
+```powershell
+.venv/Scripts/python.exe -m tsprep.cli --evaluate results/rerun_2026-11-03/aapl/fold_0/tcn_ae_seed42_beta0 --allow-source-mismatch
+.venv/Scripts/python.exe scripts/analyze_study.py results/rerun_2026-11-03 --out docs/my_historical_analysis --allow-source-mismatch
+```
+
+## Архитектуры
+
+| Название | Энкодер | Декодер |
+|---|---|---|
+| tcn_ae / tcn_vae | TCN, mean pooling | интерполяция seed + TCN |
+| lstm_ae / lstm_vae | LSTM, последнее состояние | авторегрессивный LSTM |
+| transformer_ae / transformer_vae | Transformer, mean pooling | non-autoregressive Transformer |
+| hybrid_ae / hybrid_vae | TCN + attention pooling | тот же TCN decoder |
+
+Hybrid-AE и Transformer-VAE — абляции к шести исходным моделям.
+Teacher forcing — опция TrainConfig только для LSTM, по умолчанию выключена.
+В validation/test всегда используется свободная генерация.
+Receptive field TCN: `1 + 2*(kernel_size-1)*(2**levels-1)`.
+Attention не видит данные за границами окна.
 
 ## Данные
 
-- **Синтетика** (`data_preprocessing/synthetic.py`) - работает сразу, без интернета:
-  стохастический тренд + многомасштабная сезонность + GARCH-подобная
-  волатильность + структурные сдвиги режимов + внесенные точечные
-  аномалии (для downstream-оценки).
-- **Реальные данные** - положите CSV (дата + числовые колонки,
-  отсортировано по возрастанию даты) и укажите путь через
-  `--data csv --csv-path ...`. В этом окружении сетевой доступ к
-  финансовым API (yfinance и т.п.) закрыт, поэтому выгрузку нужно
-  сделать заранее, локально.
+Для CSV признаки задаются явно через `--columns`. Числа должны быть
+конечными, даты — уникальными и возрастающими. По умолчанию:
+log → first difference → train-fitted Z-нормализация.
+`--no-log-transform` выбирается осознанно для другой шкалы. Конвейер
+предназначен для выбранных ценовых признаков, а не любых OHLCV/макропоказателей.
 
-## Методология оценки
+`csv_quality_report` проверяет пропуски, Inf, даты, постоянные признаки и
+OHLC-согласованность. Подозрительные котировки автоматически не исправляются.
+USD/RUB исключён из стандартного исследования: противоречивые котировки
+и нулевой Volume требуют сверки источника. Raw CSV не изменяются.
 
-1. **Реконструкция**: $MSE$, $MAE$, $R^2$ на тестовом (по времени, после train/val) диапазоне.
-2. **Полезность эмбеддингов** (downstream): линейный зонд $z \rightarrow y$ на горизонте $H$,
-   $\text{silhouette}$ эмбеддингов относительно скрытых режимов.
-3. **Структура/устойчивость**: коэффициент информационного коллапса
-   $\mu = \frac{tr(Cov(z))}{tr(Cov(X))}$, $F1$ обнаружения внесенных аномалий по
-   композитному скору $\text{recon error} + \lambda \cdot \text{KL}$ .
+Синтетика содержит random walk с GARCH-инновациями, сезонность, повторяющиеся
+режимы, clean signal, наблюдаемый ряд и маску загрязнения. Clean signal
+содержит случайные экономические инновации; из него исключены отдельно
+добавленные ошибки наблюдения и аномальные импульсы.
+Маска разностей учитывает обе точки вычитания.
 
-## Примечание по интерпретации результатов
+## Протокол
 
-После дифференцирования (детрендирования) синтетический экономический
-ряд близок к процессу с малой автокорреляцией (аналог гипотезы
-эффективного рынка) - поэтому абсолютные значения $R^2$ на реконструкции
-могут быть невысокими даже у хорошо обученной модели. Это ожидаемое,
-методологически честное поведение, а не ошибка кода: сравнение
-архитектур между собой (относительные $MSE$/$\mu$/$F1$) остается содержательным.
+Стандартный запуск: synthetic, AAPL (Adj Close), BTC (Close); окно 48,
+stride 2, latent_dim 16, hidden_dim/d_model 32, TCN levels 3, batch 128;
+seed 42, 43, 44. Тестовые периоды folds занимают примерно 70–85% и
+85–100% истории и не пересекаются. Обучающие истории пересекаются.
+
+Для каждого VAE на первом seed каждого fold сравниваются β=0.001 и 0.01
+по validation reconstruction. Выбранный β фиксируется для остальных seed.
+Это ограниченный поиск, а не исчерпывающая оптимизация или сравнение при
+равных вычислительных затратах. Всего 144 выбранных запуска и 24
+дополнительных кандидата β, до 30 эпох на обучение.
+
+Reconstruction усредняется по B*T*F, KL суммируется по latent_dim и
+усредняется по B. β задан в этих единицах. Checkpoint criterion —
+неизменная deterministic reconstruction по μ, не Monte Carlo ELBO.
+Для VAE выбор весов и отсчёт patience начинаются после warmup.
+Early stopping ждёт 8 последовательных эпох без достаточного улучшения.
+
+## Метрики и baseline
+
+- MSE/MAE/R² в стандартизованной шкале и по признакам. Оконные метрики
+  повторно учитывают пересекающиеся точки.
+- Прогноз одного будущего преобразованного наблюдения на точном H=5.
+  Это не цена и не накопленная доходность за H периодов. Ridge обучается
+  на train; коэффициент регуляризации выбирается на validation.
+- Нулевая реконструкция, PCA той же latent_dim, PCA+Ridge,
+  raw-window Ridge, train mean/median и последнее преобразованное наблюдение.
+- Silhouette с явным источником меток; один истинный режим не подменяется KMeans.
+- USREC — ретроспективная классификация. Метки не заполняются из будущего.
+  Для одного класса sensitivity/ROC-AUC ограничены или не определены.
+- Anomaly score: MSE + 0.1*KL; порог — 95-й процентиль validation без
+  подбора по test labels. Отдельно оцениваются концы окон и эпизоды
+  на наблюдаемых концах окон.
+- Эффективный ранг, active units, KL, дисперсии z. Отношение дисперсий
+  зависит от масштаба и не измеряет информацию.
+- На синтетике отдельно считается ошибка относительно clean signal.
+
+Не считайте перекрывающиеся окна независимыми экспериментами.
+Среднее/SD по seed и folds не заменяют интервалы с учётом зависимости:
+
+```powershell
+.venv/Scripts/python.exe scripts/analyze_study.py results/my_new_study
+```
+
+Скрипт сохраняет прогнозы, парные временные block-bootstrap интервалы
+разницы с baseline и графики PNG/SVG. Интервалы условны на выбранных рядах
+и протоколе; число временных блоков может быть небольшим.
+Сравниваются mean, median, raw Ridge, PCA+Ridge и last observation. При менее
+пяти временных блоках или block_len >= N границы интервала отсутствуют с явным
+статусом `insufficient_temporal_blocks`; длина блока не обрезается до N.
+Для короткого BTC test интервалы при блоках 24/48/96 не выдаются.
+Все производные файлы помещаются в новый каталог анализа; `--out` позволяет
+задать его явно. Clean MSE/MAE и ошибки на нормальных/загрязнённых точках
+сохраняются отдельно. Перекрывающиеся точки в этих исторических метриках
+по-прежнему учитываются повторно.
+
+## Артефакты
+
+Каждый запуск сохраняет `manifest.json`, `model.pt`, `input.npz`;
+выбранный кандидат — также `metrics.json`. Manifest содержит полные
+конфигурации, fitted normalizer, split bounds, признаки, историю,
+best epoch/β, версии и контрольные суммы.
+При загрузке preprocessing не переобучается, суммы проверяются.
+Snapshot данных позволяет повторить оценку независимо от изменений CSV.
+Загрузка также проверяет вычислительные source hashes. Изменения только
+`evaluation/visualize.py` не меняют вычислительную идентичность. Новые artifacts
+содержат `source.zip`, runtime/backend flags и `input_fingerprint`.
+
+Исследование сохраняет protocol, data quality, baseline каждого fold,
+подробную и агрегированную CSV-таблицы. Старые pickle/checkpoint-каталоги
+автоматически не подхватываются: metadata недостаточно для воспроизведения.
+
+## Проверки и структура
+
+```powershell
+.venv/Scripts/python.exe -m unittest discover -s tests -p "test_*.py" -v
+# При установленном dev extra:
+.venv/Scripts/python.exe -m pytest -q
+```
+
+Проверяются прежние шесть функций, LSTM batch invariance, stopping/checkpoint,
+horizon/stride, пороги, anomaly labels, preprocessing и повторная оценка.
+
+`experiment.py` — общий конвейер; `study.py` — исследование;
+`cli.py` — одиночный запуск. Подпакеты data_preprocessing, models,
+mlcore и evaluation — данные, архитектуры, обучение и метрики.
