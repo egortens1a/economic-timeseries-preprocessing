@@ -1,10 +1,11 @@
-.venv/*
-logs/*
+.venv/
+logs/
 __pycache__/
 data/*
-results/*
-*legacy/*
+results/
+*legacy/
 *.egg-info/
 отчеты/
-docs/**/*.npz
+*.docx
+docs/
 build/

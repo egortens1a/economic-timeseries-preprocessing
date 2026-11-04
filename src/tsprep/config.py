@@ -96,10 +96,14 @@ class TrainConfig:
     device: str = "cpu"
     seed: int = 42
     deterministic: bool = False
+    training_target: str = "observed"
+    validation_target: str = "observed"
 
     def __post_init__(self):
         if not isinstance(self.deterministic, bool):
             raise ValueError("deterministic must be boolean")
+        if self.training_target not in ("observed", "clean") or self.validation_target not in ("observed", "clean"):
+            raise ValueError("training_target and validation_target must be observed or clean")
         positive_int("epochs", self.epochs)
         positive_int("early_stopping_patience", self.early_stopping_patience)
         if not isinstance(self.kl_anneal_epochs, int) or self.kl_anneal_epochs < 0:
@@ -110,7 +114,7 @@ class TrainConfig:
                 raise ValueError(f"invalid {name}")
         if self.grad_clip_norm is not None and (not math.isfinite(self.grad_clip_norm) or self.grad_clip_norm <= 0):
             raise ValueError("grad_clip_norm must be positive or None")
-        if self.recon_loss not in ("mse", "mae") or self.selection_metric not in ("recon", "fixed_beta"):
+        if self.recon_loss not in ("mse", "mae") or self.selection_metric not in ("recon", "fixed_beta", "endpoint_mae"):
             raise ValueError("unsupported loss or selection metric")
 
 

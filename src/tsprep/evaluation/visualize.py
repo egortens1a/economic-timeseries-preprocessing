@@ -58,3 +58,33 @@ def comparison_table(results: dict) -> pd.DataFrame:
     if "mse" in df.columns:
         df = df.sort_values("mse")
     return df
+
+
+def plot_task_metric(frame, metric, title=None):
+    """Compare methods within dataset/fold; error bars describe initialization SD."""
+    if frame.empty or metric not in frame:
+        fig, ax = plt.subplots(figsize=(7, 2))
+        ax.text(.5, .5, "No measurements for this task", ha="center", va="center")
+        ax.set_axis_off()
+        return fig
+    keys = [key for key in ("dataset", "fold", "unit", "label_source") if key in frame]
+    groups = list(frame.groupby(keys, dropna=False))
+    columns = min(3, len(groups))
+    rows = (len(groups)+columns-1)//columns
+    fig, axes = plt.subplots(rows, columns, figsize=(7*columns, 5*rows), squeeze=False)
+    for axis, (group, values) in zip(axes.flat, groups):
+        summary = values.groupby("model")[metric].agg(["mean", "std", "count"]).dropna(subset=["mean"])
+        if len(summary):
+            axis.barh(summary.index, summary["mean"], xerr=summary["std"].fillna(0))
+            axis.axvline(0, color="black", linewidth=.7)
+        else:
+            axis.text(.5, .5, "Metric is undefined for this split", ha="center", va="center", transform=axis.transAxes)
+        group = group if isinstance(group, tuple) else (group,)
+        axis.set_title(", ".join(f"{key}={value}" for key, value in zip(keys, group)))
+        axis.set_xlabel(metric)
+        axis.grid(axis="x", alpha=.2)
+    for axis in list(axes.flat)[len(groups):]:
+        axis.set_axis_off()
+    fig.suptitle((title or metric)+"; mean ± initialization SD (not CI)")
+    fig.tight_layout()
+    return fig

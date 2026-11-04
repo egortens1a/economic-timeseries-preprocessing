@@ -29,6 +29,9 @@ def main():
                         help="Explicit historical reevaluation; does not enable study resume")
     parser.add_argument("--beta", type=float, default=.01)
     parser.add_argument("--warmup", type=int, default=5)
+    parser.add_argument("--training-target", choices=["observed", "clean"], default="observed")
+    parser.add_argument("--validation-target", choices=["observed", "clean"], default="observed")
+    parser.add_argument("--selection-metric", choices=["recon", "fixed_beta", "endpoint_mae"], default="recon")
     parser.add_argument("--log-transform", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--length", type=int, default=3000)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -59,7 +62,9 @@ def main():
         seed=args.seed if args.loader_seed is None else args.loader_seed),
         ModelConfig(model_name=args.model, hidden_dim=32, d_model=32, tcn_levels=3),
         TrainConfig(epochs=args.epochs, beta_target=args.beta, kl_anneal_epochs=args.warmup,
-                    seed=args.seed, device=args.device, deterministic=args.deterministic))
+                    seed=args.seed, device=args.device, deterministic=args.deterministic,
+                    training_target=args.training_target, validation_target=args.validation_target,
+                    selection_metric=args.selection_metric))
     out = args.out or str(Path("results")/datetime.now(timezone.utc).strftime("run_%Y%m%dT%H%M%S%fZ"))
     result = train_experiment(exp, raw, output_dir=out, regime=regime, is_anomaly=anomaly, dates=dates,
                              feature_names=names, clean_raw=clean,

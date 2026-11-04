@@ -75,9 +75,10 @@ def summarize(rows, target):
     atomic_write(target/"comparison_summary.csv", summary.to_csv().encode("utf-8"))
 
 
-def validate_completed_study(target, *, allow_legacy=False):
+def validate_completed_study(target, *, allow_legacy=False, allow_source_mismatch=None):
     """Validate grid, all candidates and selected metrics, including old studies explicitly."""
     target = Path(target)
+    allow_source_mismatch = allow_legacy if allow_source_mismatch is None else allow_source_mismatch
     protocol, complete = read_json(target/"protocol.json"), read_json(target/"complete.json")
     legacy = protocol.get("version", 2) != STUDY_VERSION
     if legacy and not allow_legacy:
@@ -94,7 +95,7 @@ def validate_completed_study(target, *, allow_legacy=False):
                 raise ValueError(f"Completion checksum mismatch: {name}")
     identities = {}
     for path in sorted(target.glob("*/fold_*/*/manifest.json")):
-        m = verify_artifact(path.parent, allow_source_mismatch=allow_legacy)
+        m = verify_artifact(path.parent, allow_source_mismatch=allow_source_mismatch)
         fingerprint = input_fingerprint(load_npz(path.parent/"input.npz"), m["preprocessing"]["features"])
         identities.setdefault(path.parent.parent, set()).add(fingerprint)
     if any(len(versions) != 1 for versions in identities.values()):
@@ -106,7 +107,8 @@ def validate_completed_study(target, *, allow_legacy=False):
         m = read_json(artifact/"manifest.json")
         if m["config"]["model"]["model_name"] != row.model or m["config"]["train"]["seed"] != row.seed:
             raise ValueError("Table artifact configuration mismatch")
-        metrics = read_json(artifact/"metrics.json") if legacy else verify_metrics(artifact)
+        metrics = read_json(artifact/"metrics.json") if legacy else verify_metrics(
+            artifact, allow_evaluator_mismatch=allow_source_mismatch)
         if not np.isclose(metrics["mse"], row.mse, rtol=0, atol=1e-12) or not np.isclose(
                 metrics["forecast"]["mae"], row.forecast_mae, rtol=0, atol=1e-12):
             raise ValueError("Table metrics mismatch")

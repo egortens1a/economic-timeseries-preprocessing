@@ -27,7 +27,7 @@ Runtime-зависимости: `reqs.txt`. Точные версии иссле
 .venv/Scripts/python.exe -m tsprep.cli --evaluate results/my_new_study/aapl/fold_0/tcn_ae_seed42_beta0
 ```
 
-`--out` — новый каталог, не JSON-файл. Одиночный эксперимент не
+`--out` - новый каталог, не JSON-файл. Одиночный эксперимент не
 перезаписывается. Исследование можно продолжить с теми же аргументами,
 если протокол и исходники совпадают. Незавершённый отдельный артефакт
 требует проверки причины сбоя.
@@ -75,8 +75,8 @@ lock нужно проверить записанные PID и host.
 | transformer_ae / transformer_vae | Transformer, mean pooling | non-autoregressive Transformer |
 | hybrid_ae / hybrid_vae | TCN + attention pooling | тот же TCN decoder |
 
-Hybrid-AE и Transformer-VAE — абляции к шести исходным моделям.
-Teacher forcing — опция TrainConfig только для LSTM, по умолчанию выключена.
+Hybrid-AE и Transformer-VAE - абляции к шести исходным моделям.
+Teacher forcing - опция TrainConfig только для LSTM, по умолчанию выключена.
 В validation/test всегда используется свободная генерация.
 Receptive field TCN: `1 + 2*(kernel_size-1)*(2**levels-1)`.
 Attention не видит данные за границами окна.
@@ -84,7 +84,7 @@ Attention не видит данные за границами окна.
 ## Данные
 
 Для CSV признаки задаются явно через `--columns`. Числа должны быть
-конечными, даты — уникальными и возрастающими. По умолчанию:
+конечными, даты - уникальными и возрастающими. По умолчанию:
 log → first difference → train-fitted Z-нормализация.
 `--no-log-transform` выбирается осознанно для другой шкалы. Конвейер
 предназначен для выбранных ценовых признаков, а не любых OHLCV/макропоказателей.
@@ -107,14 +107,14 @@ stride 2, latent_dim 16, hidden_dim/d_model 32, TCN levels 3, batch 128;
 seed 42, 43, 44. Тестовые периоды folds занимают примерно 70–85% и
 85–100% истории и не пересекаются. Обучающие истории пересекаются.
 
-Для каждого VAE на первом seed каждого fold сравниваются β=0.001 и 0.01
-по validation reconstruction. Выбранный β фиксируется для остальных seed.
+Для каждого VAE на первом seed каждого fold сравниваются $\beta$=0.001 и 0.01
+по validation reconstruction. Выбранный $\beta$ фиксируется для остальных seed.
 Это ограниченный поиск, а не исчерпывающая оптимизация или сравнение при
 равных вычислительных затратах. Всего 144 выбранных запуска и 24
-дополнительных кандидата β, до 30 эпох на обучение.
+дополнительных кандидата $\beta$, до 30 эпох на обучение.
 
 Reconstruction усредняется по B*T*F, KL суммируется по latent_dim и
-усредняется по B. β задан в этих единицах. Checkpoint criterion —
+усредняется по B. $\beta$ задан в этих единицах. Checkpoint criterion -
 неизменная deterministic reconstruction по μ, не Monte Carlo ELBO.
 Для VAE выбор весов и отсчёт patience начинаются после warmup.
 Early stopping ждёт 8 последовательных эпох без достаточного улучшения.
@@ -129,9 +129,9 @@ Early stopping ждёт 8 последовательных эпох без до�
 - Нулевая реконструкция, PCA той же latent_dim, PCA+Ridge,
   raw-window Ridge, train mean/median и последнее преобразованное наблюдение.
 - Silhouette с явным источником меток; один истинный режим не подменяется KMeans.
-- USREC — ретроспективная классификация. Метки не заполняются из будущего.
+- USREC - ретроспективная классификация. Метки не заполняются из будущего.
   Для одного класса sensitivity/ROC-AUC ограничены или не определены.
-- Anomaly score: MSE + 0.1*KL; порог — 95-й процентиль validation без
+- Anomaly score: MSE + 0.1*KL; порог - 95-й процентиль validation без
   подбора по test labels. Отдельно оцениваются концы окон и эпизоды
   на наблюдаемых концах окон.
 - Эффективный ранг, active units, KL, дисперсии z. Отношение дисперсий
@@ -160,9 +160,9 @@ Early stopping ждёт 8 последовательных эпох без до�
 ## Артефакты
 
 Каждый запуск сохраняет `manifest.json`, `model.pt`, `input.npz`;
-выбранный кандидат — также `metrics.json`. Manifest содержит полные
+выбранный кандидат - также `metrics.json`. Manifest содержит полные
 конфигурации, fitted normalizer, split bounds, признаки, историю,
-best epoch/β, версии и контрольные суммы.
+best epoch/$\beta$, версии и контрольные суммы.
 При загрузке preprocessing не переобучается, суммы проверяются.
 Snapshot данных позволяет повторить оценку независимо от изменений CSV.
 Загрузка также проверяет вычислительные source hashes. Изменения только
@@ -184,6 +184,38 @@ Snapshot данных позволяет повторить оценку нез�
 Проверяются прежние шесть функций, LSTM batch invariance, stopping/checkpoint,
 horizon/stride, пороги, anomaly labels, preprocessing и повторная оценка.
 
-`experiment.py` — общий конвейер; `study.py` — исследование;
-`cli.py` — одиночный запуск. Подпакеты data_preprocessing, models,
-mlcore и evaluation — данные, архитектуры, обучение и метрики.
+`experiment.py` - общий конвейер; `study.py` - исследование;
+`cli.py` - одиночный запуск. Подпакеты data_preprocessing, models,
+mlcore и evaluation - данные, архитектуры, обучение и метрики.
+
+## Ноутбуки и downstream
+
+- `01_data_preparation.ipynb`: разметка режимов/аномалий, точные forecast-пары,
+  paired observed/clean окна с одним train-fitted нормализатором.
+- `02_model_zoo_smoke_test.ipynb`: формы и градиенты моделей, сравнение loss
+  для observed и clean targets на одном noisy input.
+- `03_training_and_comparison.ipynb`: стандартный study и отдельные таблицы
+  задач по dataset/fold, включая baseline, precision/recall и доступность меток.
+- `04_evaluation_and_results.ipynb`: forecast-графики, confusion matrix,
+  PR-кривые, фиксированные validation anomaly thresholds, clean-ошибки на
+  нормальных/загрязнённых endpoints и парные forecast-интервалы.
+- `05_denoising_comparison.ipynb`: небольшой TCN-AE с двумя training targets,
+  observed и clean; общий checkpoint criterion — validation endpoint clean MAE.
+  Включены observed input, PCA, train mean и causal median baseline, а прогноз
+  оценивается отдельно на точном H=7.
+
+Ноутбук 05 — отладочный опыт с data seed 9001 и одним initialization seed.
+Он не заменяет подтверждающий эксперимент на независимых траекториях.
+Снижение MSE выбросов оценивается вместе с MAE и повреждением нормальных точек.
+
+Парная цель доступна и для одиночного запуска на синтетике:
+
+```powershell
+.venv/Scripts/python.exe -m tsprep.cli --model tcn_ae --epochs 40 --data-seed 9001 --training-target clean --validation-target clean --selection-metric endpoint_mae
+```
+
+Clean target требуется явно; на реальном CSV без чистого эталона этот режим
+завершится ошибкой. Старые сохранённые metrics можно читать при явном
+`allow_source_mismatch=True`: их hashes и привязка к manifest проверяются,
+но совпадение версии оценщика не требуется. Resume продолжает требовать
+исходную конфигурацию и вычислительный код.

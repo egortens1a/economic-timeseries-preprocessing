@@ -62,18 +62,25 @@ def seed_everything(seed, deterministic=False):
 def _run_epoch(model, loader, cfg, beta, optimizer=None):
     is_train = optimizer is not None
     model.train(is_train)
-    totals = dict(loss=0., recon=0., kl=0.)
+    totals = dict(loss=0., recon=0., kl=0., endpoint_mae=0.)
     n_samples = 0
     for index, batch in enumerate(loader):
-        x = batch.to(cfg.device)
-        if not torch.isfinite(x).all():
-            raise FloatingPointError(f"Nonfinite input in batch {index}")
+        paired = isinstance(batch, (tuple, list))
+        target_kind = cfg.training_target if is_train else cfg.validation_target
+        if target_kind == "clean" and not paired:
+            raise ValueError("Clean reconstruction requires paired input/target batches")
+        if paired and len(batch) != 2:
+            raise ValueError("Expected an input/target pair")
+        x, target = (batch[0].to(cfg.device), batch[1].to(cfg.device)) if paired else (batch.to(cfg.device), batch.to(cfg.device))
+        if x.shape != target.shape or not torch.isfinite(x).all() or not torch.isfinite(target).all():
+            raise FloatingPointError(f"Invalid input/target in batch {index}")
         with torch.set_grad_enabled(is_train):
             if is_train and cfg.teacher_forcing:
                 x_hat, _, mu, logvar = model(x, use_teacher_forcing=True)
             else:
                 x_hat, _, mu, logvar = model(x)
-            loss, parts = compute_loss(x_hat, x, mu, logvar, model.variational, cfg.recon_loss, beta)
+            loss, parts = compute_loss(x_hat, target, mu, logvar, model.variational, cfg.recon_loss, beta)
+            parts["endpoint_mae"] = (x_hat[:, -1]-target[:, -1]).abs().mean().item()
         if not torch.isfinite(loss):
             raise FloatingPointError(f"Nonfinite loss in batch {index}; inspect inputs and logvar")
         if is_train:
@@ -108,7 +115,8 @@ def train_model(model, train_loader, val_loader, cfg, verbose=True):
         train = _run_epoch(model, train_loader, cfg, beta, optimizer)
         val = _run_epoch(model, val_loader, cfg, beta)
         # Deterministic reconstruction at mu, NOT a Monte Carlo ELBO estimate.
-        score = val["recon"] + (cfg.beta_target * val["kl"] if cfg.selection_metric == "fixed_beta" else 0.)
+        score = (val["endpoint_mae"] if cfg.selection_metric == "endpoint_mae" else
+                 val["recon"] + (cfg.beta_target * val["kl"] if cfg.selection_metric == "fixed_beta" else 0.))
         for key, value in (("train_loss", train["loss"]), ("val_loss", val["loss"]),
                            ("train_recon", train["recon"]), ("val_recon", val["recon"]),
                            ("val_kl", val["kl"]), ("beta", beta), ("selection_loss", score),

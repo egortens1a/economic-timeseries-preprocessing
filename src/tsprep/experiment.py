@@ -39,13 +39,16 @@ def save_metrics(directory, result):
     return result
 
 
-def verify_metrics(directory):
+def verify_metrics(directory, *, allow_evaluator_mismatch=False):
     target = Path(directory)
     receipt = read_json(target/"metrics_receipt.json")
-    if receipt != dict(sha256=file_hash(target/"metrics.json"), **metric_binding(target)):
+    binding = {key: receipt.get(key) for key in ("manifest_sha256", "evaluator_sha256")}
+    if receipt.get("sha256") != file_hash(target/"metrics.json") or binding["manifest_sha256"] != file_hash(target/"manifest.json"):
         raise ValueError(f"Cached metrics provenance/checksum mismatch: {target}")
+    if binding["evaluator_sha256"] != evaluator_hash() and not allow_evaluator_mismatch:
+        raise ValueError(f"Cached metrics evaluator mismatch: {target}")
     result = read_json(target/"metrics.json")
-    if result.get("provenance") != metric_binding(target):
+    if result.get("provenance") != binding:
         raise ValueError(f"Cached metrics binding mismatch: {target}")
     return result
 
@@ -178,12 +181,18 @@ def evaluate_baselines(p, cfg, latent_dim=16, clean_raw=None):
 def train_experiment(exp, raw, *, output_dir, regime=None, is_anomaly=None, dates=None, feature_names=None,
                      clean_raw=None, metadata=None, verbose=True, evaluate=True):
     """Persist immutable inputs, full settings and fitted preprocessing before evaluation."""
+    needs_clean = "clean" in (exp.train.training_target, exp.train.validation_target)
+    if needs_clean and (clean_raw is None or np.shape(clean_raw) != np.shape(raw)):
+        raise ValueError("Clean training/validation target requires aligned clean_raw")
     target = Path(output_dir)
     target.mkdir(parents=True, exist_ok=False)
     seed_everything(exp.train.seed, exp.train.deterministic)
     prepared = prepare_and_window(raw, exp.data, regime, is_anomaly, dates=dates, feature_names=feature_names)
     model = build_model(exp.model, exp.data.n_features, exp.data.window_len)
-    train, val, _ = build_dataloaders(prepared, exp.data)
+    clean = prepare_and_window(clean_raw, exp.data, normalizer=prepared.normalizer) if needs_clean else None
+    train, val, _ = build_dataloaders(prepared, exp.data,
+        train_targets=clean.train_windows if exp.train.training_target == "clean" else None,
+        val_targets=clean.val_windows if exp.train.validation_target == "clean" else None)
     history = train_model(model, train, val, exp.train, verbose=verbose)
     model.to("cpu")
     torch.save(model.state_dict(), target/"model.pt")

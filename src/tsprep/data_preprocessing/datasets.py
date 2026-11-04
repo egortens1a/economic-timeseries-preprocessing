@@ -27,16 +27,20 @@ def chronological_split_indices(n, train_frac, val_frac, test_frac):
 
 
 class WindowDataset(Dataset):
-    def __init__(self, windows):
+    def __init__(self, windows, targets=None):
         if windows.ndim != 3 or not len(windows):
             raise ValueError("windows must be nonempty (N,T,F)")
         self.windows = windows
+        if targets is not None and targets.shape != windows.shape:
+            raise ValueError("targets must match input windows")
+        self.targets = targets
 
     def __len__(self):
         return len(self.windows)
 
     def __getitem__(self, index):
-        return torch.tensor(self.windows[index], dtype=torch.float32)
+        x = torch.tensor(self.windows[index], dtype=torch.float32)
+        return x if self.targets is None else (x, torch.tensor(self.targets[index], dtype=torch.float32))
 
 
 @dataclass
@@ -95,15 +99,15 @@ def forecast_pairs(prepared, split, cfg):
     return np.flatnonzero(valid), prepared.raw_normalized[targets[valid], cfg.target_feature]
 
 
-def build_dataloaders(prepared, cfg):
+def build_dataloaders(prepared, cfg, *, train_targets=None, val_targets=None):
     generator = torch.Generator().manual_seed(cfg.seed)
-    train = DataLoader(WindowDataset(prepared.train_windows), batch_size=cfg.batch_size,
+    train = DataLoader(WindowDataset(prepared.train_windows, train_targets), batch_size=cfg.batch_size,
                        shuffle=True, drop_last=False, generator=generator)
-    return train, build_eval_loader(prepared.val_windows, cfg.batch_size), build_eval_loader(prepared.test_windows, cfg.batch_size)
+    return train, build_eval_loader(prepared.val_windows, cfg.batch_size, targets=val_targets), build_eval_loader(prepared.test_windows, cfg.batch_size)
 
 
-def build_eval_loader(windows, batch_size):
-    return DataLoader(WindowDataset(windows), batch_size=batch_size, shuffle=False, drop_last=False)
+def build_eval_loader(windows, batch_size, *, targets=None):
+    return DataLoader(WindowDataset(windows, targets), batch_size=batch_size, shuffle=False, drop_last=False)
 
 
 def aggregate_windows(windows, starts, length, *, mode="last"):
