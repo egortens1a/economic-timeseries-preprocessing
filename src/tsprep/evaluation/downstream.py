@@ -1,4 +1,4 @@
-"""Downstream probes and validation-only anomaly calibration."""
+"""Прогноз, классификация и выбор порога аномалий на проверочной выборке."""
 import numpy as np
 from sklearn.cluster import KMeans
 from sklearn.linear_model import Ridge, LogisticRegression
@@ -13,6 +13,23 @@ def regression_report(y, pred):
     return dict(mae=float(mean_absolute_error(y, pred)), r2=float(r2_score(y, pred)) if len(y)>1 else None)
 
 
+def fit_probe(train_x, train_y, val_x, val_y):
+    """Fit a serializable Ridge probe; scaler and weights use train only."""
+    mean, std = train_x.mean(axis=0), train_x.std(axis=0)+1e-8
+    best = None
+    for alpha in (.1, 1., 10., 100.):
+        reg = Ridge(alpha=alpha).fit((train_x-mean)/std, train_y)
+        score = float(np.abs(reg.predict((val_x-mean)/std)-val_y).mean())
+        if best is None or score < best["validation_mae"]:
+            best = dict(mean=mean.tolist(), std=std.tolist(), coef=reg.coef_.tolist(),
+                        intercept=float(reg.intercept_), alpha=alpha, validation_mae=score)
+    return best
+
+
+def predict_probe(probe, x):
+    return ((x-np.asarray(probe["mean"]))/np.asarray(probe["std"])) @ np.asarray(probe["coef"]) + probe["intercept"]
+
+
 def forecast_via_linear_probe(z_train, y_train, z_test, y_test, *, z_val=None, y_val=None):
     candidates = [0.1, 1., 10., 100.]
     if z_val is None:
@@ -23,6 +40,7 @@ def forecast_via_linear_probe(z_train, y_train, z_test, y_test, *, z_val=None, y
         value = mean_absolute_error(y_val, reg.predict(z_val)) if z_val is not None else 0.
         if value < score:
             best, score, alpha = reg, value, a
+    
     return {**regression_report(y_test, best.predict(z_test)), "ridge_alpha": alpha,
             "validation_mae": float(score) if z_val is not None else None}
 
@@ -51,8 +69,10 @@ def classify_via_linear_probe(z_train, y_train, z_test, y_test, class_weight="ba
     z_test, y_test = z_test[te_ok], y_test[te_ok]
     if not np.isin(y_train, [0, 1]).all() or not np.isin(y_test, [0, 1]).all():
         raise ValueError("classification probe supports binary targets only")
+    
     if len(np.unique(y_train)) < 2 or not len(y_test):
         return dict(accuracy=None, f1=None, roc_auc=None, pr_auc=None, note="insufficient labelled classes")
+    
     clf = make_pipeline(StandardScaler(), LogisticRegression(max_iter=2000, class_weight=class_weight))
     clf.fit(z_train, y_train)
     scores = clf.predict_proba(z_test)[:, 1]
@@ -63,6 +83,7 @@ def classify_via_linear_probe(z_train, y_train, z_test, y_test, class_weight="ba
 def _label_windows(labels, window_len, stride, n_windows):
     if min(window_len, stride, n_windows) < 1 or (n_windows-1)*stride+window_len > len(labels):
         raise ValueError("label length does not match windows")
+    
     return [np.asarray(labels)[i*stride:i*stride+window_len] for i in range(n_windows)]
 
 
@@ -70,8 +91,10 @@ def window_class_labels(labels, window_len, stride, n_windows, rule="last"):
     windows = _label_windows(labels, window_len, stride, n_windows)
     if rule == "last":
         return np.asarray([w[-1] for w in windows])
+    
     if rule != "majority":
         raise ValueError("Unknown window label rule")
+    
     result = []
     for w in windows:
         if not np.isfinite(w).all():
@@ -80,6 +103,7 @@ def window_class_labels(labels, window_len, stride, n_windows, rule="last"):
             values, counts = np.unique(w, return_counts=True)
             winners = values[counts == counts.max()]
             result.append(w[-1] if w[-1] in winners else winners[0])
+    
     return np.asarray(result)
 
 
@@ -88,17 +112,21 @@ def clustering_quality(z, labels=None, n_clusters=3):
     source = "true_regime" if labels is not None else "kmeans"
     if z.ndim != 2 or not np.isfinite(z).all():
         raise ValueError("invalid embeddings")
+    
     if labels is not None:
         labels = np.asarray(labels)
         if labels.shape != (len(z),):
             raise ValueError("labels must match embeddings")
         valid = np.isfinite(labels)
         z, labels = z[valid], labels[valid]
+    
     if len(z) > 2000:
         idx = np.random.default_rng(0).choice(len(z), 2000, replace=False)
         z, labels = z[idx], None if labels is None else labels[idx]
+    
     if labels is None and len(z)>n_clusters and len(np.unique(z, axis=0))>=n_clusters:
         labels = KMeans(n_clusters=n_clusters, n_init=10, random_state=0).fit_predict(z)
+    
     groups = 0 if labels is None else len(np.unique(labels))
     if not 2 <= groups < len(z):
         return dict(silhouette=None, label_source=source, n_clusters=groups,
@@ -110,13 +138,16 @@ def clustering_quality(z, labels=None, n_clusters=3):
 def anomaly_scores(x, x_hat, kl_per_window=None, lam=0.):
     if x.shape != x_hat.shape or x.ndim != 3 or lam < 0:
         raise ValueError("invalid reconstruction or KL weight")
+    
     score = np.mean((x-x_hat)**2, axis=(1, 2))
     if kl_per_window is not None:
         if np.asarray(kl_per_window).shape != score.shape:
             raise ValueError("KL shape mismatch")
         score = score + lam*np.asarray(kl_per_window)
+    
     if not np.isfinite(score).all():
         raise ValueError("nonfinite anomaly scores")
+    
     return score
 
 
@@ -124,11 +155,14 @@ def calibrate_threshold(validation_scores, *, quantile=.95, validation_labels=No
     scores = np.asarray(validation_scores)
     if scores.ndim != 1 or not len(scores) or not np.isfinite(scores).all() or not 0 < quantile < 1:
         raise ValueError("invalid calibration scores/quantile")
+    
     if validation_labels is None:
         return float(np.quantile(scores, quantile))
+    
     labels = np.asarray(validation_labels)
     if labels.shape != scores.shape or not np.isin(labels, [0, 1]).all() or len(np.unique(labels)) < 2:
         raise ValueError("supervised calibration needs both classes in validation")
+    
     thresholds = np.unique(np.quantile(scores, np.linspace(0, 1, 101)))
     # Include an all-positive rule; ties prefer the more conservative threshold.
     thresholds = np.r_[np.nextafter(scores.min(), -np.inf), thresholds]
@@ -139,6 +173,7 @@ def calibrate_threshold(validation_scores, *, quantile=.95, validation_labels=No
 def anomaly_detection_f1(x, x_hat, is_anomaly_window, *, threshold, kl_per_window=None, lam=0.):
     if not np.isfinite(threshold):
         raise ValueError("fixed finite validation-calibrated threshold required")
+    
     scores = anomaly_scores(x, x_hat, kl_per_window, lam)
     labels = np.asarray(is_anomaly_window)
     report = binary_report(labels, (scores>threshold).astype(int), scores)
@@ -155,6 +190,7 @@ def event_report(labels, predictions):
     labels, predictions = np.asarray(labels, bool), np.asarray(predictions, bool)
     if labels.shape != predictions.shape:
         raise ValueError("event arrays mismatch")
+    
     boundaries = np.flatnonzero(np.diff(np.r_[False, labels, False].astype(int)))
     events = list(zip(boundaries[::2], boundaries[1::2]))
     detected = sum(predictions[a:b].any() for a,b in events)

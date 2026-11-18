@@ -1,4 +1,4 @@
-"""Checks for paired targets and saved downstream tables."""
+"""Проверки целевых значений и таблиц прогноза, классификации и аномалий."""
 from contextlib import redirect_stdout
 from dataclasses import asdict
 import io
@@ -18,10 +18,10 @@ from tsprep.data_preprocessing.preprocessing import TrainFittedNormalizer
 from tsprep.experiment import train_experiment, load_artifact, evaluate_artifact, verify_metrics, write_json
 from tsprep.mlcore.trainer import _run_epoch
 from tsprep.provenance import read_json
-from tsprep.evaluation.study_results import load_study_tables, task_summary
+from tsprep.evaluation.experiment_results import load_experiment_tables, task_summary
 from tsprep.evaluation.examples import downstream_example
 from tsprep.evaluation.reconstruction import collect_embeddings
-from tsprep import study
+from tsprep import comparison_experiment as experiment
 
 
 class DownstreamNotebookTests(unittest.TestCase):
@@ -98,11 +98,11 @@ class DownstreamNotebookTests(unittest.TestCase):
         data = dict(raw=s.values, regime=s.regime, is_anomaly=s.is_anomaly,
                     clean_raw=s.clean_values, feature_names=["price"], dates=None)
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory)/"study"
-            with patch.object(study, "dataset", return_value=data), redirect_stdout(io.StringIO()):
-                study.run_study(Path(__file__).resolve().parents[1], path, epochs=1, seeds=(42, 43),
+            path = Path(directory)/"experiment"
+            with patch.object(experiment, "dataset", return_value=data), redirect_stdout(io.StringIO()):
+                experiment.run_experiment(Path(__file__).resolve().parents[1], path, epochs=1, seeds=(42, 43),
                                 datasets=("synthetic",), folds=(0,), models=["tcn_ae"])
-            tables = load_study_tables(path)
+            tables = load_experiment_tables(path)
             fore = tables["forecast"]
             self.assertEqual(len(fore[fore.role == "model"]), 2)
             self.assertFalse(fore[fore.role == "baseline"].duplicated(["dataset", "fold", "model"]).any())

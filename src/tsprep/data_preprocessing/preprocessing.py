@@ -1,4 +1,4 @@
-"""Train-fitted transformations with a serializable inverse."""
+"""Преобразования ряда с сохранением параметров и обратным преобразованием."""
 from dataclasses import dataclass
 import numpy as np
 

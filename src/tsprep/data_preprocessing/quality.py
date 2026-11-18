@@ -1,4 +1,4 @@
-"""Read-only economic CSV quality diagnostics. Never silently repair quotes."""
+"""Проверка CSV: пропуски, даты, постоянные признаки и согласованность OHLC."""
 from pathlib import Path
 import hashlib
 import numpy as np

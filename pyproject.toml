@@ -20,7 +20,7 @@ notebook = ["jupyter>=1.0"]
 [project.scripts]
 tsprep-download = "tsprep.data_preprocessing.download:main"
 tsprep-experiment = "tsprep.cli:main"
-tsprep-study = "tsprep.study:main"
+tsprep-comparison = "tsprep.comparison_experiment:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

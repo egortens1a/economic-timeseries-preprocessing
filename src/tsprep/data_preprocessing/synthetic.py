@@ -1,4 +1,4 @@
-"""Recurrent regimes, random walk, GARCH innovations and explicit clean/noisy pairs."""
+"""Синтетические ряды со сменой режимов, GARCH-волатильностью и ошибками наблюдения."""
 from dataclasses import dataclass
 import numpy as np
 

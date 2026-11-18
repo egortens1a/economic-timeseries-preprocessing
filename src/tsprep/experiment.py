@@ -1,4 +1,4 @@
-"""One train/save/load/evaluate protocol shared by CLI and notebooks."""
+"""Обучение, сохранение и оценка модели; используется в CLI и ноутбуках."""
 from dataclasses import asdict
 from pathlib import Path
 import json
@@ -180,7 +180,7 @@ def evaluate_baselines(p, cfg, latent_dim=16, clean_raw=None):
 
 def train_experiment(exp, raw, *, output_dir, regime=None, is_anomaly=None, dates=None, feature_names=None,
                      clean_raw=None, metadata=None, verbose=True, evaluate=True):
-    """Persist immutable inputs, full settings and fitted preprocessing before evaluation."""
+    """Обучает модель, сохраняет входные данные и настройки, вычисляет метрики."""
     needs_clean = "clean" in (exp.train.training_target, exp.train.validation_target)
     if needs_clean and (clean_raw is None or np.shape(clean_raw) != np.shape(raw)):
         raise ValueError("Clean training/validation target requires aligned clean_raw")
@@ -193,18 +193,21 @@ def train_experiment(exp, raw, *, output_dir, regime=None, is_anomaly=None, date
     train, val, _ = build_dataloaders(prepared, exp.data,
         train_targets=clean.train_windows if exp.train.training_target == "clean" else None,
         val_targets=clean.val_windows if exp.train.validation_target == "clean" else None)
+  
     history = train_model(model, train, val, exp.train, verbose=verbose)
     model.to("cpu")
     torch.save(model.state_dict(), target/"model.pt")
     arrays = input_arrays(raw, regime=regime, is_anomaly=is_anomaly, clean_raw=clean_raw, dates=dates)
     save_npz(target/"input.npz", arrays)
     source_snapshot(target/"source.zip")
+   
     manifest = dict(version=ARTIFACT_VERSION, config=asdict(exp), preprocessing=preprocessing_metadata(prepared),
         metadata=metadata or {}, history=asdict(history),
         parameters=sum(p.numel() for p in model.parameters()), source_hashes=source_hashes(),
         input_fingerprint=input_fingerprint(arrays, prepared.feature_names),
         environment=runtime_environment(exp.train.device),
         hashes={name: file_hash(target/name) for name in ("input.npz", "model.pt", "source.zip")})
+  
     write_json(target/"manifest.json", manifest)
     if evaluate:
         result = evaluate_model(model, prepared, exp.data, exp.train.device, clean_raw)
@@ -212,7 +215,9 @@ def train_experiment(exp, raw, *, output_dir, regime=None, is_anomaly=None, date
                       best_beta=history.best_beta, validation_score=history.best_score,
                       epochs_ran=len(history.train_loss), parameters=manifest["parameters"],
                       training_seconds=float(sum(history.epoch_time_sec)))
+   
         return save_metrics(target, result)
+   
     return {"validation_score": history.best_score, "artifact": str(target)}
 
 
@@ -232,6 +237,7 @@ def load_artifact(directory, device="cpu", *, allow_source_mismatch=False):
         # JSON stores tuple bounds as lists.
         if json.loads(json.dumps(preprocessing_metadata(prepared))) != manifest["preprocessing"]:
             raise ValueError("Preprocessing metadata mismatch")
+  
     model = build_model(exp.model, exp.data.n_features, exp.data.window_len)
     model.load_state_dict(torch.load(target/"model.pt", map_location="cpu", weights_only=True))
     model.to(device).eval()
@@ -245,4 +251,5 @@ def evaluate_artifact(directory, device="cpu", *, allow_source_mismatch=False):
         best_beta=manifest["history"]["best_beta"], validation_score=manifest["history"]["best_score"],
         epochs_ran=len(manifest["history"]["train_loss"]), parameters=manifest["parameters"],
         training_seconds=float(sum(manifest["history"]["epoch_time_sec"])))
+  
     return result

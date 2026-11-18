@@ -1,6 +1,7 @@
-"""Serializable, validated experiment configuration."""
+"""Настройки данных, моделей и экспериментов с проверкой параметров."""
 from dataclasses import dataclass, field
 import math
+from tsprep.data_preprocessing.denoising import FAMILIES
 
 ALL_MODEL_NAMES = ["tcn_ae", "tcn_vae", "lstm_ae", "lstm_vae", "transformer_ae", "hybrid_vae"]
 ABLATION_MODEL_NAMES = ["hybrid_ae", "transformer_vae"]
@@ -123,3 +124,102 @@ class ExperimentConfig:
     data: DataConfig = field(default_factory=DataConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
+
+
+@dataclass(frozen=True)
+class ImputationProtocol:
+    """Параметры заполнения пропусков; значения по умолчанию для NN5."""
+    window: int = 56
+    period: int = 7
+    train_stop: int = 511
+    val_stop: int = 623
+    epochs: int = 60
+    batch_size: int = 256
+    learning_rates: tuple = (.0003, .001)
+    initialization_seeds: tuple = (111, 222, 333)
+    validation_mask_seeds: tuple = (31001, 31002, 31003)
+    test_mask_seeds: tuple = (41001, 41002, 41003)
+    missing_fraction: float = .05
+    pca_ranks: tuple = (4, 8, 16, 24)
+    ridge_alphas: tuple = (.1, 1., 10., 100.)
+    shrinkages: tuple = (0., .25, .5, 1.)
+    bootstrap_repeats: int = 5000
+    bootstrap_seed: int = 55013
+    bootstrap_block: int = 4
+    device: str = "cpu"
+    threads: int = 1
+
+    def validate(self, length):
+        for name in ("window", "period", "train_stop", "val_stop", "epochs", "batch_size",
+                     "bootstrap_repeats", "bootstrap_block", "threads"):
+            positive_int(name, getattr(self, name))
+        if self.window % self.period or self.window < self.period:
+            raise ValueError("window must be a multiple of period")
+        if not self.window < self.train_stop < self.val_stop < length:
+            raise ValueError("require window < train_stop < val_stop < input length")
+        if (self.val_stop-self.train_stop) % self.period or (length-self.val_stop) % self.period:
+            raise ValueError("validation and test lengths must contain whole seasonal periods")
+        if not math.isfinite(self.missing_fraction) or not 0 < self.missing_fraction < 1:
+            raise ValueError("missing_fraction must be between zero and one")
+        for name in ("initialization_seeds", "validation_mask_seeds", "test_mask_seeds"):
+            group = getattr(self, name)
+            if not group or len(group) != len(set(group)) or any(type(s) is not int or s < 0 for s in group):
+                raise ValueError(f"{name} must contain unique nonnegative integers")
+        if set(self.validation_mask_seeds) & set(self.test_mask_seeds):
+            raise ValueError("validation and test masks require separate seeds")
+        for name in ("learning_rates", "ridge_alphas"):
+            if not getattr(self, name) or any(not math.isfinite(x) or x <= 0 for x in getattr(self, name)):
+                raise ValueError(f"invalid {name}")
+        if not self.pca_ranks or any(type(x) is not int or x < 1 for x in self.pca_ranks):
+            raise ValueError("pca_ranks must contain positive integers")
+        if not self.shrinkages or any(not math.isfinite(x) or not 0 <= x <= 1 for x in self.shrinkages):
+            raise ValueError("shrinkages must lie in [0, 1]")
+        if type(self.bootstrap_seed) is not int or self.bootstrap_seed < 0:
+            raise ValueError("bootstrap_seed must be nonnegative")
+
+
+@dataclass
+class RepresentationProtocol:
+    """Параметры сравнения эмбеддингов обычного AE и AE с удалением шума."""
+    protocol_id: str = "embedding_robustness_v1"
+    length: int = 6000
+    window: int = 48
+    latent_dim: int = 8
+    hidden_dim: int = 16
+    levels: int = 3
+    training_stride: int = 4
+    train_fraction: float = .7
+    batch_size: int = 128
+    epochs: int = 120
+    learning_rates: tuple = (.0003, .001)
+    development_seeds: tuple = (16001, 16002, 16003)
+    confirmation_seeds: tuple = tuple(range(96001, 96021))
+    initialization_seeds: tuple = (111, 222, 333)
+    mad_thresholds: tuple = (3., 5., 7., 9.)
+    forecast_horizon: int = 7
+    bootstrap_repeats: int = 5000
+    bootstrap_seed: int = 61017
+    device: str = "cpu"
+    smoke: bool = False
+    families: tuple = FAMILIES
+
+    def validate(self):
+        from tsprep.data_preprocessing.denoising import FAMILIES
+        for name in ("length", "window", "latent_dim", "hidden_dim", "levels", "training_stride",
+                     "batch_size", "epochs", "forecast_horizon", "bootstrap_repeats"):
+            positive_int(name, getattr(self, name))
+        groups = (self.development_seeds, self.confirmation_seeds, self.initialization_seeds)
+        if any(not s or len(s) != len(set(s)) for s in groups) or 111 not in self.initialization_seeds:
+            raise ValueError("unique nonempty seed groups including initialization seed 111 required")
+        if set(self.development_seeds) & set(self.confirmation_seeds) or len(self.confirmation_seeds) < 2:
+            raise ValueError("need independent development and at least two confirmation seeds")
+        if not self.families or len(set(self.families)) != len(self.families) or set(self.families)-set(FAMILIES):
+            raise ValueError("invalid generator families")
+        if not self.learning_rates or any(not math.isfinite(x) or x <= 0 for x in self.learning_rates):
+            raise ValueError("invalid learning rates")
+        if not self.mad_thresholds or any(not math.isfinite(x) or x <= 0 for x in self.mad_thresholds):
+            raise ValueError("invalid MAD thresholds")
+        if not 0 < self.train_fraction < 1 or self.latent_dim >= self.window:
+            raise ValueError("invalid split or compression dimension")
+        if min(int((self.length-1)*self.train_fraction), int((self.length-1)*(1-self.train_fraction))) < self.window+self.forecast_horizon:
+            raise ValueError("trajectory segments too short")

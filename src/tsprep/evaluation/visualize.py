@@ -27,12 +27,14 @@ def plot_reconstruction_examples(x: np.ndarray, x_hat: np.ndarray, n_examples: i
     fig, axes = plt.subplots(n_examples, 1, figsize=(9, 2.2 * n_examples), sharex=True)
     if n_examples == 1:
         axes = [axes]
+  
     for ax, i in zip(axes, idx):
         ax.plot(x[i, :, feature], label="original")
         ax.plot(x_hat[i, :, feature], label="reconstruction", linestyle="--")
         ax.set_ylabel(f"win #{i}")
         ax.set_xticks(range(0, x.shape[1], max(1, x.shape[1] // 8)))
         ax.grid(alpha=0.3)
+   
     axes[0].legend()
     fig.suptitle("Примеры реконструкции окон (нормализованный масштаб)")
     fig.tight_layout()
@@ -47,6 +49,7 @@ def plot_latent_projection(proj: np.ndarray, labels: np.ndarray | None = None, t
         ax.add_artist(legend)
     else:
         ax.scatter(proj[:, 0], proj[:, 1], s=8, alpha=0.7)
+ 
     ax.set_title(title)
     fig.tight_layout()
     return fig
@@ -57,6 +60,7 @@ def comparison_table(results: dict) -> pd.DataFrame:
     df = pd.DataFrame(results).T
     if "mse" in df.columns:
         df = df.sort_values("mse")
+  
     return df
 
 
@@ -67,6 +71,7 @@ def plot_task_metric(frame, metric, title=None):
         ax.text(.5, .5, "No measurements for this task", ha="center", va="center")
         ax.set_axis_off()
         return fig
+  
     keys = [key for key in ("dataset", "fold", "unit", "label_source") if key in frame]
     groups = list(frame.groupby(keys, dropna=False))
     columns = min(3, len(groups))
@@ -79,12 +84,15 @@ def plot_task_metric(frame, metric, title=None):
             axis.axvline(0, color="black", linewidth=.7)
         else:
             axis.text(.5, .5, "Metric is undefined for this split", ha="center", va="center", transform=axis.transAxes)
+     
         group = group if isinstance(group, tuple) else (group,)
         axis.set_title(", ".join(f"{key}={value}" for key, value in zip(keys, group)))
         axis.set_xlabel(metric)
         axis.grid(axis="x", alpha=.2)
+   
     for axis in list(axes.flat)[len(groups):]:
         axis.set_axis_off()
+   
     fig.suptitle((title or metric)+"; mean ± initialization SD (not CI)")
     fig.tight_layout()
     return fig

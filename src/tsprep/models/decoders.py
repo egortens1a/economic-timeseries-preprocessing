@@ -13,8 +13,8 @@ class TCNDecoder(nn.Module):
         self.window_len = window_len
         self.seed_len = max(4, window_len // (2 ** min(n_levels, 4)))
         self.upsampling = upsampling
-        # Same linear map as align_corners=False interpolation, built on CPU.
-        # GEMM backward avoids CUDA interpolation's atomic gradient accumulation.
+        # Матрица повторяет интерполяцию с align_corners=False.
+        # Умножение на матрицу даёт воспроизводимый backward на CUDA.
         basis = torch.eye(self.seed_len).unsqueeze(0)
         matrix = F.interpolate(basis, size=window_len, mode="linear", align_corners=False)[0]
         self.register_buffer("interpolation_matrix", matrix, persistent=False)

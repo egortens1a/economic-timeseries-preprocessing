@@ -1,4 +1,4 @@
-"""Compare saved models with baselines and estimate paired temporal intervals."""
+"""Сравнение сохранённых моделей с простыми методами и расчёт временных интервалов."""
 import argparse
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,7 +21,7 @@ from threadpoolctl import threadpool_limits
 from tsprep.experiment import load_artifact
 from tsprep.provenance import (write_json, read_json, file_hash, atomic_write, save_npz, runtime_environment,
                                source_hashes, source_snapshot)
-from tsprep.study import validate_completed_study
+from tsprep.comparison_experiment import validate_completed_experiment
 from tsprep.data_preprocessing.datasets import build_eval_loader, forecast_pairs, prepare_and_window
 from tsprep.evaluation.reconstruction import collect_embeddings
 from tsprep.evaluation.uncertainty import paired_block_interval
@@ -31,8 +31,8 @@ def fit_predict(xtr, ytr, xte, alpha):
     return make_pipeline(StandardScaler(), Ridge(alpha=alpha)).fit(xtr, ytr).predict(xte)
 
 
-def baseline_arrays(study, row, p, cfg, latent_dim):
-    stored = read_json(study / row.dataset / f"fold_{row.fold}" / "baselines.json")
+def baseline_arrays(experiment, row, p, cfg, latent_dim):
+    stored = read_json(experiment / row.dataset / f"fold_{row.fold}" / "baselines.json")
     train = np.asarray(p.train_windows, dtype=np.float32).reshape(len(p.train_windows), -1)
     test = np.asarray(p.test_windows, dtype=np.float32).reshape(len(p.test_windows), -1)
     pca = PCA(n_components=min(latent_dim, *train.shape), svd_solver="full").fit(train)
@@ -58,21 +58,22 @@ def baseline_arrays(study, row, p, cfg, latent_dim):
     return dict(predictions=predictions, pca_hat=hat, stored=stored)
 
 
-def analyze(study, device, *, output_dir=None, allow_source_mismatch=False, repeats=2000):
-    study = Path(study).resolve()
-    rows = validate_completed_study(study, allow_legacy=allow_source_mismatch)
-    target = Path(output_dir) if output_dir else study/datetime.now(timezone.utc).strftime("analysis_%Y%m%dT%H%M%S%fZ")
+def analyze(experiment, device, *, output_dir=None, allow_source_mismatch=False, repeats=2000):
+    experiment = Path(experiment).resolve()
+    rows = validate_completed_experiment(experiment, allow_legacy=allow_source_mismatch)
+    target = Path(output_dir) if output_dir else experiment/datetime.now(timezone.utc).strftime("analysis_%Y%m%dT%H%M%S%fZ")
     target.mkdir(parents=True, exist_ok=False)
-    write_json(target/"analysis_protocol.json", dict(study=str(study), runs=len(rows), device=device,
+    # Имя поля оставлено для совместимости с сохранёнными таблицами.
+    write_json(target/"analysis_protocol.json", dict(study=str(experiment), runs=len(rows), device=device,
         source_mismatch_explicitly_allowed=allow_source_mismatch, repeats=repeats, blocks=[24, 48, 96],
         min_blocks=5, source_hashes=source_hashes(), analysis_script_sha256=file_hash(__file__),
-        origin_table_sha256=file_hash(study/"comparison_runs.csv"), environment=runtime_environment(device)))
+        origin_table_sha256=file_hash(experiment/"comparison_runs.csv"), environment=runtime_environment(device)))
     source_snapshot(target/"source.zip")
     intervals, invariance, benchmarks, details, histories = [], [], [], [], []
     losses, cache = {}, {}
     reference = rows.iloc[0]
     for row in rows.itertuples():
-        artifact = study/row.artifact
+        artifact = experiment/row.artifact
         model, p, exp, manifest, arrays = load_artifact(artifact, device,
                                                      allow_source_mismatch=allow_source_mismatch)
         out = {s: collect_embeddings(model, build_eval_loader(getattr(p, s+"_windows"), exp.data.batch_size), device)
@@ -84,7 +85,7 @@ def analyze(study, device, *, output_dir=None, allow_source_mismatch=False, repe
                                  metrics["forecast"]["ridge_alpha"])
         key = (row.dataset, row.fold, exp.model.latent_dim)
         if key not in cache:
-            cache[key] = baseline_arrays(study, row, p, exp.data, exp.model.latent_dim)
+            cache[key] = baseline_arrays(experiment, row, p, exp.data, exp.model.latent_dim)
         base = cache[key]
         errors = ((out["test"]["x"]-out["test"]["x_hat"])**2).mean(axis=(1, 2))
         pca_errors = ((out["test"]["x"]-base["pca_hat"])**2).mean(axis=(1, 2))
@@ -113,7 +114,7 @@ def analyze(study, device, *, output_dir=None, allow_source_mismatch=False, repe
                 deltas[f"clean_{name}_minus_input"] = model_loss-input_loss
                 deltas[f"clean_{name}_minus_pca"] = model_loss-pca_loss
                 clean_values["clean_"+name+"_per_window"] = model_loss
-            # Element weighting intentionally matches the original overlapping-window metrics.
+            # Усреднение такое же, как у исходных метрик перекрывающихся окон.
             if p.is_anomaly is not None:
                 mask = np.stack([p.is_anomaly[start:start+exp.data.window_len] for start in p.window_starts["test"]])
                 for label, selected in (("contaminated", mask), ("normal", ~mask)):
@@ -226,7 +227,7 @@ def _plots(frame, target):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("study")
+    parser.add_argument("experiment")
     parser.add_argument("--out")
     parser.add_argument("--allow-source-mismatch", action="store_true")
     parser.add_argument("--repeats", type=int, default=2000)
@@ -234,5 +235,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
     torch.set_num_threads(2)
     with threadpool_limits(limits=2):
-        print(analyze(args.study, args.device, output_dir=args.out,
+        print(analyze(args.experiment, args.device, output_dir=args.out,
                       allow_source_mismatch=args.allow_source_mismatch, repeats=args.repeats))

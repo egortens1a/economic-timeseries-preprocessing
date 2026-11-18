@@ -1,4 +1,4 @@
-"""Atomic persistence, input identity and recorded execution environment."""
+"""Сохранение файлов, контрольных сумм и параметров окружения."""
 from contextlib import contextmanager
 import hashlib
 import io
@@ -32,7 +32,7 @@ def file_hash(path):
 
 
 def atomic_write(path, data):
-    """Publish a whole file on the same filesystem; retain old content on failure."""
+    """Записывает файл через временную копию; при сбое исходный файл сохраняется."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
@@ -130,13 +130,13 @@ def runtime_environment(device="cpu"):
 
 
 @contextmanager
-def study_lock(target):
-    """Exclusive cooperative writer; an interrupted process leaves a visible lock."""
+def experiment_lock(target):
+    """Блокирует параллельную запись в папку. После аварии остаётся файл блокировки."""
     path = Path(target) / ".writer.lock"
     try:
         descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError as exc:
-        raise RuntimeError(f"Study writer lock exists: {path}. Check the recorded PID before removing a stale lock.") from exc
+        raise RuntimeError(f"Experiment writer lock exists: {path}. Check the recorded PID before removing a stale lock.") from exc
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
             stream.write(canonical_json(dict(pid=os.getpid(), host=platform.node())))

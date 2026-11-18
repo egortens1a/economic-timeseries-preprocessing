@@ -8,7 +8,7 @@ def load_csv_series(
     date_col: str = "Date",
     value_cols: list[str] | None = None,
 ) -> np.ndarray:
-    """Обратно совместимая версия: возвращает только значения (без дат)."""
+    """Возвращает числовые значения выбранных столбцов."""
     dates, values, _ = load_csv_series_with_dates(path, date_col, value_cols)
     return values
 
@@ -18,8 +18,7 @@ def load_csv_series_with_dates(
     date_col: str = "Date",
     value_cols: list[str] | None = None,
 ) -> tuple:
-    """То же самое, что ``load_csv_series``, но дополнительно возвращает
-    массив дат - нужен для выравнивания внешней разметки (см. ниже)."""
+    """Возвращает даты, числовые значения и названия выбранных столбцов."""
     df = pd.read_csv(path)
     if date_col not in df.columns:
         raise ValueError(f"Column '{date_col}' not found in {path}. Columns: {list(df.columns)}")

@@ -1,4 +1,4 @@
-"""Tests for study resume, artifact integrity and paired bootstrap."""
+"""Проверки продолжения эксперимента, контрольных сумм и парного бутстрепа."""
 from contextlib import redirect_stdout
 from dataclasses import asdict
 import io
@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/"src"))
-from tsprep import study
+from tsprep import comparison_experiment as experiment
 from tsprep import cli
 from tsprep.config import DataConfig, ModelConfig, TrainConfig, ExperimentConfig
 from tsprep.data_preprocessing.synthetic import generate_series
@@ -22,14 +22,14 @@ from tsprep.provenance import read_json, atomic_write, input_arrays, input_finge
 from tsprep.evaluation.uncertainty import paired_block_interval
 
 
-class StudyIntegrityTests(unittest.TestCase):
+class ExperimentIntegrityTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         torch.set_num_threads(1)
 
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
-        self.target = Path(self.temporary.name)/"study"
+        self.target = Path(self.temporary.name)/"experiment"
         s = generate_series(length=700, seed=2026)
         self.data = dict(raw=s.values, regime=s.regime, is_anomaly=s.is_anomaly,
                          clean_raw=s.clean_values, dates=None, feature_names=["price"])
@@ -39,28 +39,28 @@ class StudyIntegrityTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def run_study(self, **kwargs):
-        with patch.object(study, "dataset", return_value=self.data), redirect_stdout(io.StringIO()):
-            return study.run_study(Path(__file__).resolve().parents[1], self.target, **{**self.args, **kwargs})
+    def run_experiment(self, **kwargs):
+        with patch.object(experiment, "dataset", return_value=self.data), redirect_stdout(io.StringIO()):
+            return experiment.run_experiment(Path(__file__).resolve().parents[1], self.target, **{**self.args, **kwargs})
 
     def interrupt(self):
-        real = study.train_experiment
+        real = experiment.train_experiment
         def call(exp, *args, **kwargs):
             if exp.train.seed == 43:
                 raise RuntimeError("simulated interruption")
             return real(exp, *args, **kwargs)
-        with patch.object(study, "train_experiment", side_effect=call):
+        with patch.object(experiment, "train_experiment", side_effect=call):
             with self.assertRaisesRegex(RuntimeError, "simulated interruption"):
-                self.run_study()
+                self.run_experiment()
 
     def test_resume_keeps_completed_run_and_finishes_grid(self):
         self.interrupt()
         first = next(self.target.glob("*/fold_*/*/model.pt"))
         original_hash = file_hash(first)
         self.assertFalse((self.target/"complete.json").exists())
-        self.run_study()
+        self.run_experiment()
         self.assertEqual(file_hash(first), original_hash)
-        self.assertEqual(len(study.validate_completed_study(self.target)), 2)
+        self.assertEqual(len(experiment.validate_completed_experiment(self.target)), 2)
 
     def test_changed_values_rejected_before_any_write(self):
         self.interrupt()
@@ -68,7 +68,7 @@ class StudyIntegrityTests(unittest.TestCase):
         self.data["raw"] = self.data["raw"].copy()
         self.data["raw"][20] *= 1.01
         with self.assertRaisesRegex(ValueError, "changed inputs"):
-            self.run_study()
+            self.run_experiment()
         self.assertEqual(file_hash(self.target/"data_quality.json"), previous)
         self.assertFalse((self.target/"complete.json").exists())
 
@@ -77,14 +77,14 @@ class StudyIntegrityTests(unittest.TestCase):
         self.data["regime"] = self.data["regime"].copy()
         self.data["regime"][20] = 99
         with self.assertRaisesRegex(ValueError, "changed inputs"):
-            self.run_study()
+            self.run_experiment()
 
     def test_corrupt_cached_weights_rejected_on_resume(self):
         self.interrupt()
         with next(self.target.glob("*/fold_*/*/model.pt")).open("ab") as stream:
             stream.write(b"corrupt")
         with self.assertRaisesRegex(ValueError, "checksum mismatch"):
-            self.run_study()
+            self.run_experiment()
 
     def test_corrupt_cached_metrics_rejected_on_resume(self):
         self.interrupt()
@@ -93,7 +93,7 @@ class StudyIntegrityTests(unittest.TestCase):
         metrics["mse"] = -999
         write_json(path, metrics)
         with self.assertRaisesRegex(ValueError, "metrics provenance/checksum"):
-            self.run_study()
+            self.run_experiment()
 
     def test_corrupt_baseline_rejected(self):
         self.interrupt()
@@ -102,35 +102,35 @@ class StudyIntegrityTests(unittest.TestCase):
         baseline["pca"]["mse"] = -999
         write_json(path, baseline)
         with self.assertRaisesRegex(ValueError, "Baseline checksum"):
-            self.run_study()
+            self.run_experiment()
 
     def test_final_publication_failure_does_not_publish_completion(self):
-        real = study.summarize
+        real = experiment.summarize
         def call(rows, target):
             real(rows, target)
             raise RuntimeError("publication interrupted")
-        with patch.object(study, "summarize", side_effect=call):
+        with patch.object(experiment, "summarize", side_effect=call):
             with self.assertRaisesRegex(RuntimeError, "publication interrupted"):
-                self.run_study()
+                self.run_experiment()
         self.assertFalse((self.target/"complete.json").exists())
-        self.run_study()
-        self.assertEqual(len(study.validate_completed_study(self.target)), 2)
+        self.run_experiment()
+        self.assertEqual(len(experiment.validate_completed_experiment(self.target)), 2)
 
     def test_finished_resume_never_rebuilds_partial_table(self):
-        self.run_study()
+        self.run_experiment()
         original = file_hash(self.target/"comparison_runs.csv")
-        with patch.object(study, "summarize", side_effect=AssertionError("must not rebuild")):
-            self.run_study()
+        with patch.object(experiment, "summarize", side_effect=AssertionError("must not rebuild")):
+            self.run_experiment()
         self.assertEqual(file_hash(self.target/"comparison_runs.csv"), original)
 
     def test_stale_completion_and_duplicate_grid_rejected(self):
-        self.run_study()
+        self.run_experiment()
         frame = pd.read_csv(self.target/"comparison_runs.csv")
         frame.iloc[:1].to_csv(self.target/"comparison_runs.csv", index=False)
         with self.assertRaisesRegex(ValueError, "Incomplete or duplicated"):
-            study.validate_completed_study(self.target)
+            experiment.validate_completed_experiment(self.target)
         with self.assertRaises(ValueError):
-            study.check_grid(pd.concat([frame.iloc[:1]]*2), read_json(self.target/"protocol.json"))
+            experiment.check_grid(pd.concat([frame.iloc[:1]]*2), read_json(self.target/"protocol.json"))
 
     def test_atomic_file_retains_old_content_on_replace_failure(self):
         path = Path(self.temporary.name)/"table.csv"
@@ -178,7 +178,7 @@ class StudyIntegrityTests(unittest.TestCase):
         self.assertLess(variable["lower"], variable["upper"])
 
     def test_source_mismatch_requires_explicit_historical_mode(self):
-        self.run_study(seeds=(42,))
+        self.run_experiment(seeds=(42,))
         path = next(self.target.glob("*/fold_*/*/manifest.json"))
         manifest = read_json(path)
         manifest["source_hashes"]["models/decoders.py"] = "changed"
@@ -196,7 +196,7 @@ class StudyIntegrityTests(unittest.TestCase):
         for seed in (42, 43):
             argv = ["tsprep", "--model", "tcn_ae", "--length", "700", "--epochs", "1",
                     "--model-seed", str(seed), "--loader-seed", "500", "--device", "cpu"]
-            with patch.object(sys, "argv", argv), patch.object(cli, "train_experiment", side_effect=capture), \
+            with patch.object(sys, "argv", argv), patch.object(cli, "train_experiment", side_effect=capture),\
                     redirect_stdout(io.StringIO()):
                 cli.main()
         np.testing.assert_array_equal(captured[0][1], captured[1][1])
@@ -204,7 +204,7 @@ class StudyIntegrityTests(unittest.TestCase):
         self.assertEqual([item[0].data.seed for item in captured], [500, 500])
 
     def test_v2_loader_preserves_original_interpolation(self):
-        self.run_study(seeds=(42,))
+        self.run_experiment(seeds=(42,))
         path = next(self.target.glob("*/fold_*/*/manifest.json"))
         manifest = read_json(path)
         manifest["version"] = 2

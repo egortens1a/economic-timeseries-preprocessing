@@ -1,4 +1,4 @@
-"""Immutable study inputs, verified resume and transactional final tables."""
+"""Сравнение AE/VAE на одинаковых данных с сохранением результатов каждого запуска."""
 import argparse
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -21,9 +21,9 @@ from tsprep.experiment import (train_experiment, evaluate_artifact, evaluate_bas
 from tsprep.mlcore.trainer import seed_everything
 from tsprep.provenance import (write_json, read_json, file_hash, computational_hashes, input_arrays,
     input_fingerprint, value_hash, save_npz, load_npz, atomic_write, runtime_environment,
-    source_snapshot, study_lock, evaluator_hash)
+    source_snapshot, experiment_lock, evaluator_hash)
 
-STUDY_VERSION = 3
+EXPERIMENT_VERSION = 3
 GRID_COLUMNS = ["dataset", "fold", "model", "seed"]
 
 
@@ -59,7 +59,7 @@ def expected_grid(protocol):
 
 def check_grid(frame, protocol):
     if not set(GRID_COLUMNS).issubset(frame.columns) or frame[GRID_COLUMNS].isna().any().any():
-        raise ValueError("Missing study grid columns/values")
+        raise ValueError("Missing experiment grid columns/values")
     actual = list(frame[GRID_COLUMNS].itertuples(index=False, name=None))
     if len(actual) != len(set(actual)) or set(actual) != expected_grid(protocol):
         raise ValueError("Incomplete or duplicated dataset/fold/model/seed grid")
@@ -75,43 +75,52 @@ def summarize(rows, target):
     atomic_write(target/"comparison_summary.csv", summary.to_csv().encode("utf-8"))
 
 
-def validate_completed_study(target, *, allow_legacy=False, allow_source_mismatch=None):
-    """Validate grid, all candidates and selected metrics, including old studies explicitly."""
+def validate_completed_experiment(target, *, allow_legacy=False, allow_source_mismatch=None):
+    """Проверяет состав запусков, кандидатов и сохранённые метрики."""
     target = Path(target)
     allow_source_mismatch = allow_legacy if allow_source_mismatch is None else allow_source_mismatch
     protocol, complete = read_json(target/"protocol.json"), read_json(target/"complete.json")
-    legacy = protocol.get("version", 2) != STUDY_VERSION
+    legacy = protocol.get("version", 2) != EXPERIMENT_VERSION
     if legacy and not allow_legacy:
-        raise ValueError("Historical study requires explicit allow_legacy; resume is not supported")
+        raise ValueError("Historical experiment requires explicit allow_legacy; resume is not supported")
+   
     frame = pd.read_csv(target/"comparison_runs.csv")
     check_grid(frame, protocol)
     if complete["runs"] != len(frame):
         raise ValueError("Completion row count mismatch")
+ 
     if not legacy:
         if not {"protocol.json", "comparison_runs.csv", "comparison_summary.csv"} <= set(complete.get("files", {})):
             raise ValueError("Incomplete completion receipt")
         for name, expected in complete["files"].items():
             if file_hash(target/name) != expected:
                 raise ValueError(f"Completion checksum mismatch: {name}")
+  
     identities = {}
     for path in sorted(target.glob("*/fold_*/*/manifest.json")):
         m = verify_artifact(path.parent, allow_source_mismatch=allow_source_mismatch)
         fingerprint = input_fingerprint(load_npz(path.parent/"input.npz"), m["preprocessing"]["features"])
         identities.setdefault(path.parent.parent, set()).add(fingerprint)
+   
     if any(len(versions) != 1 for versions in identities.values()):
-        raise ValueError("Mixed input snapshots in a study fold")
+        raise ValueError("Mixed input snapshots in a experiment fold")
+  
     for row in frame.itertuples():
         artifact = (target/row.artifact).resolve()
         if not artifact.is_relative_to(target.resolve()):
-            raise ValueError("Artifact path escapes study")
+            raise ValueError("Artifact path escapes experiment")
+  
         m = read_json(artifact/"manifest.json")
         if m["config"]["model"]["model_name"] != row.model or m["config"]["train"]["seed"] != row.seed:
             raise ValueError("Table artifact configuration mismatch")
+ 
         metrics = read_json(artifact/"metrics.json") if legacy else verify_metrics(
             artifact, allow_evaluator_mismatch=allow_source_mismatch)
+   
         if not np.isclose(metrics["mse"], row.mse, rtol=0, atol=1e-12) or not np.isclose(
                 metrics["forecast"]["mae"], row.forecast_mae, rtol=0, atol=1e-12):
             raise ValueError("Table metrics mismatch")
+  
     return frame
 
 
@@ -119,16 +128,21 @@ def _baseline(group, data, cfg, fingerprint):
     receipt_path = group/"baseline_receipt.json"
     binding = dict(input_fingerprint=fingerprint, config=asdict(cfg), latent_dim=16,
                    evaluator_sha256=evaluator_hash())
+   
     if receipt_path.exists():
         receipt = read_json(receipt_path)
         if receipt["binding"] != binding:
             raise ValueError("Baseline data/preprocessing/evaluator mismatch")
+   
         for name, expected in receipt["hashes"].items():
             if file_hash(group/name) != expected:
                 raise ValueError(f"Baseline checksum mismatch: {name}")
+ 
         return read_json(group/"baselines.json")
+ 
     if (group/"baselines.json").exists():
         raise RuntimeError(f"Incomplete baseline receipt: {group}")
+  
     prepared = prepare_and_window(data["raw"], cfg, data.get("regime"), data.get("is_anomaly"),
                                  dates=data.get("dates"), feature_names=data["feature_names"])
     result = evaluate_baselines(prepared, cfg, clean_raw=data.get("clean_raw"))
@@ -139,42 +153,51 @@ def _baseline(group, data, cfg, fingerprint):
     return result
 
 
-def run_study(root, target, *, epochs=30, seeds=(42, 43, 44), datasets=("synthetic", "aapl", "btc"),
+def run_experiment(root, target, *, epochs=30, seeds=(42, 43, 44), datasets=("synthetic", "aapl", "btc"),
               models=None, folds=(0, 1), device="cpu", beta_grid=(.001, .01), data_seed=2026,
               deterministic=True):
     root, target = Path(root).resolve(), Path(target).resolve()
     models = list(ALL_MODEL_NAMES + ABLATION_MODEL_NAMES if models is None else models)
     positive_int("epochs", epochs)
+   
     for name, values in (("seeds", seeds), ("datasets", datasets), ("models", models),
                          ("folds", folds), ("beta_grid", beta_grid)):
         if not values or len(set(values)) != len(values):
             raise ValueError(f"{name} must be nonempty and unique")
+  
     if not set(models) <= set(ALL_MODEL_NAMES + ABLATION_MODEL_NAMES) or not set(folds) <= {0, 1}:
         raise ValueError("Invalid model or fold")
+  
     if any(not np.isfinite(beta) or beta < 0 for beta in beta_grid):
         raise ValueError("Invalid beta grid")
+ 
     seed_everything(seeds[0], deterministic)
     quality = {p.name: csv_quality_report(p) for p in sorted((root/"data/raw").glob("*.csv"))}
     originals = {}
+  
     for name in datasets:
         if name != "synthetic" and quality[{"aapl": "aapl.csv", "btc": "btc_usd.csv"}[name]]["needs_review"]:
             raise ValueError(f"Quality gate failed for {name}")
+  
         originals[name] = dataset(root, name, data_seed=data_seed)
+  
     fingerprints = {name: input_fingerprint(data_arrays(data), data["feature_names"])
                     for name, data in originals.items()}
-    protocol = dict(version=STUDY_VERSION, epochs=epochs, seeds=list(seeds), datasets=list(datasets),
+    protocol = dict(version=EXPERIMENT_VERSION, epochs=epochs, seeds=list(seeds), datasets=list(datasets),
         models=models, folds=list(folds), device=device, beta_grid=list(beta_grid), data_seed=data_seed,
         deterministic=deterministic, input_fingerprints=fingerprints,
         beta_selection="validation reconstruction, first seed per fold", window_len=48, stride=2,
         hidden_dim=32, latent_dim=16, tcn_levels=3, upsampling="matmul",
         checkpoint="minimum deterministic validation reconstruction after KL warm-up",
         anomaly_quantile=.95, source_hashes=computational_hashes(), environment=runtime_environment(device))
+  
     if (target/"protocol.json").exists():
         if read_json(target/"protocol.json") != protocol:
             raise ValueError("Cannot resume with changed inputs, protocol, environment or computational source")
     else:
         target.mkdir(parents=True, exist_ok=False)
-    with study_lock(target):
+ 
+    with experiment_lock(target):
         if not (target/"protocol.json").exists():
             write_json(target/"protocol.json", protocol)
             write_json(target/"data_quality.json", quality)
@@ -185,17 +208,22 @@ def run_study(root, target, *, epochs=30, seeds=(42, 43, 44), datasets=("synthet
                 save_npz(target/"inputs"/f"{name}.npz", data_arrays(data))
                 write_json(target/"inputs"/f"{name}.json", dict(features=data["feature_names"],
                     fingerprint=fingerprints[name], sha256=file_hash(target/"inputs"/f"{name}.npz")))
+  
         snapshots = {}
         for name in datasets:
             receipt = read_json(target/"inputs"/f"{name}.json")
             arrays = load_npz(target/"inputs"/f"{name}.npz")
             if (receipt["sha256"] != file_hash(target/"inputs"/f"{name}.npz") or
                     input_fingerprint(arrays, receipt["features"]) != fingerprints[name]):
-                raise ValueError("Study input snapshot checksum/fingerprint mismatch")
+  
+                raise ValueError("Experiment input snapshot checksum/fingerprint mismatch")
+  
             snapshots[name] = dict(**arrays, feature_names=receipt["features"])
+ 
         if (target/"complete.json").exists():
-            validate_completed_study(target)
+            validate_completed_experiment(target)
             return target
+  
         started = time.perf_counter()
         write_json(target/"state.json", dict(status="running", protocol_sha256=value_hash(protocol)))
         try:
@@ -223,15 +251,19 @@ def _row(name, fold, model, seed, beta, score, selected, result, baseline, targe
         epochs=result["epochs_ran"], best_epoch=result["best_epoch"], training_seconds=result["training_seconds"],
         parameters=result["parameters"], active_units=result["latent"]["active_units"], kl=result["test_kl_mean"],
         artifact=selected.relative_to(target).as_posix())
+   
     for name_, key in (("mean", "train_mean"), ("median", "train_median"), ("raw", "raw_window_ridge")):
         row["forecast_vs_"+name_] = result["forecast"]["mae"]-baseline["forecast"][key]["mae"]
+
     row["forecast_vs_pca"] = result["forecast"]["mae"]-baseline["pca"]["forecast"]["mae"]
     for prefix, key in (("class", "classification"), ("anomaly", "anomaly")):
         for metric in ("f1", "pr_auc"):
             row[f"{prefix}_{metric}"] = result.get(key, {}).get(metric)
+  
     for prefix, key in (("clean", "clean_reconstruction"), ("input_clean", "noisy_input_vs_clean")):
         for metric in ("mse", "mae"):
             row[f"{prefix}_{metric}"] = result.get(key, {}).get(metric)
+   
     return row
 
 
@@ -268,14 +300,18 @@ def _execute(originals, target, protocol, started):
                                 raise RuntimeError(f"Incomplete artifact: {path}; inspect before retrying")
                             print(f"TRAIN {name} fold={fold} {model_name} seed={seed} beta={beta:g}", flush=True)
                             score = train_experiment(exp, output_dir=path, **data, verbose=False, evaluate=False,
+                                # Старое имя поля сохранено для чтения прежних результатов.
                                 metadata=dict(dataset=name, fold=fold, study=str(target),
                                               beta_tuning_seed=protocol["seeds"][0]))["validation_score"]
+    
                         results.append((score, beta, path))
+         
                     score, chosen_beta, selected = min(results, key=lambda item: item[0])
                     if (selected/"metrics.json").exists():
                         result = verify_metrics(selected)
                     else:
                         result = save_metrics(selected, evaluate_artifact(selected, protocol["device"]))
+     
                     row = _row(name, fold, model_name, seed, chosen_beta, score, selected, result, baseline, target)
                     rows.append(row)
                     atomic_write(target/"progress.csv", pd.DataFrame(rows).to_csv(index=False).encode("utf-8"))
@@ -299,8 +335,8 @@ def main():
     parser.add_argument("--threads", type=int, default=2)
     args = parser.parse_args()
     torch.set_num_threads(args.threads)
-    target = args.out or str(Path(args.root)/"results"/datetime.now(timezone.utc).strftime("study_%Y%m%dT%H%M%S%fZ"))
-    run_study(args.root, target, epochs=args.epochs, seeds=args.seeds, datasets=args.datasets,
+    target = args.out or str(Path(args.root)/"results"/datetime.now(timezone.utc).strftime("experiment_%Y%m%dT%H%M%S%fZ"))
+    run_experiment(args.root, target, epochs=args.epochs, seeds=args.seeds, datasets=args.datasets,
               models=args.models, folds=args.folds, device=args.device, data_seed=args.data_seed,
               deterministic=args.deterministic)
 

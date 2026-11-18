@@ -1,4 +1,4 @@
-"""Compare repeated training runs on CPU and CUDA."""
+"""Сравнение результатов повторного обучения на CPU и CUDA."""
 import argparse
 from pathlib import Path
 import sys

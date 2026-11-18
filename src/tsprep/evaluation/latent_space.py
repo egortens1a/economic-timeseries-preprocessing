@@ -1,10 +1,10 @@
-"""Descriptive latent diagnostics; variance ratio is not information content."""
+"""Характеристики латентных векторов; отношение дисперсий зависит от масштаба."""
 import numpy as np
 from sklearn.decomposition import PCA
 
 
 def information_collapse_ratio(z, x):
-    """Legacy API: scale-dependent variance ratio, NOT an information metric."""
+    """Отношение сумм дисперсий z и элементов входного окна; зависит от масштаба."""
     if len(z) < 2 or len(z) != len(x):
         raise ValueError("at least two aligned samples required")
     return float(np.var(z, axis=0, ddof=1).sum() /
@@ -27,6 +27,7 @@ def latent_diagnostics(z):
 def pca_project(z, n_components=2):
     if len(z) < 2 or z.shape[1] < n_components:
         raise ValueError("insufficient samples/features for requested PCA projection")
+    
     return PCA(n_components=min(n_components, len(z)), random_state=0).fit_transform(z)
 
 
@@ -34,5 +35,6 @@ def tsne_project(z, n_components=2, perplexity=30.):
     from sklearn.manifold import TSNE
     if len(z) < 3 or z.shape[1] < n_components or perplexity <= 0:
         raise ValueError("insufficient samples/features or invalid perplexity")
+    
     return TSNE(n_components=n_components, perplexity=min(perplexity, len(z)-1),
                 random_state=0, init="pca").fit_transform(z)

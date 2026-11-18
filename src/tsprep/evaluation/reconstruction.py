@@ -40,8 +40,10 @@ def collect_embeddings(model: Autoencoder, loader: DataLoader, device: str = "cp
         xhs.append(x_hat.cpu().numpy())
         if logvar is not None:
             kls.append((-0.5 * (1 + logvar - mu.square() - logvar.exp()).sum(dim=1)).cpu().numpy())
+    
     if not xs:
         raise ValueError("Cannot collect embeddings from an empty loader")
+    
     return {
         "z": np.concatenate(zs, axis=0),
         "x": np.concatenate(xs, axis=0),
@@ -53,6 +55,7 @@ def collect_embeddings(model: Autoencoder, loader: DataLoader, device: str = "cp
 def reconstruction_report(x: np.ndarray, x_hat: np.ndarray) -> dict:
     if x.shape != x_hat.shape or x.ndim != 3 or not np.isfinite(x).all() or not np.isfinite(x_hat).all():
         raise ValueError("Reconstruction arrays must be finite, aligned (N,T,F)")
+    
     return {"mse": mse(x, x_hat), "mae": mae(x, x_hat), "r2": r2_score(x, x_hat),
             "per_feature": [{"mse": mse(x[..., i], x_hat[..., i]),
                              "mae": mae(x[..., i], x_hat[..., i]),

@@ -1,4 +1,4 @@
-"""Chronological windows, exact forecast indices, and preprocessing metadata."""
+"""Разделение ряда по времени, нарезка окон и сопоставление с будущими значениями."""
 from dataclasses import dataclass, field
 import numpy as np
 import torch
@@ -41,6 +41,29 @@ class WindowDataset(Dataset):
     def __getitem__(self, index):
         x = torch.tensor(self.windows[index], dtype=torch.float32)
         return x if self.targets is None else (x, torch.tensor(self.targets[index], dtype=torch.float32))
+
+
+class TensorWindowLoader:
+    """Batch resident windows directly; keep a separate reproducible shuffle stream."""
+    def __init__(self, windows, batch_size, device="cpu", *, targets=None, shuffle=False, seed=42):
+        if windows.ndim != 3 or not len(windows) or batch_size < 1:
+            raise ValueError("nonempty windows and positive batch size required")
+        if targets is not None and targets.shape != windows.shape:
+            raise ValueError("targets must match windows")
+        self.windows = torch.as_tensor(windows, dtype=torch.float32, device=device)
+        self.targets = None if targets is None else torch.as_tensor(targets, dtype=torch.float32, device=device)
+        self.batch_size, self.shuffle = batch_size, shuffle
+        self.generator = torch.Generator(device=device).manual_seed(seed)
+
+    def __len__(self):
+        return (len(self.windows)+self.batch_size-1)//self.batch_size
+
+    def __iter__(self):
+        order = torch.randperm(len(self.windows), generator=self.generator, device=self.windows.device) if self.shuffle else None
+        for start in range(0, len(self.windows), self.batch_size):
+            indices = order[start:start+self.batch_size] if self.shuffle else slice(start, start+self.batch_size)
+            x = self.windows[indices]
+            yield x if self.targets is None else (x, self.targets[indices])
 
 
 @dataclass

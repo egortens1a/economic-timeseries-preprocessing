@@ -1,4 +1,4 @@
-"""Training with fixed checkpoint criterion and sample-weighted metrics."""
+"""Обучение AE/VAE и выбор весов по ошибке на проверочной выборке."""
 import math
 import time
 from dataclasses import dataclass, field
@@ -44,8 +44,9 @@ def seed_everything(seed, deterministic=False):
     import random
     import os
     if deterministic:
-        # Must be set before the first cuBLAS call in this process.
+        # Задать до первого обращения к cuBLAS.
         os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+  
     torch.use_deterministic_algorithms(deterministic)
     torch.set_float32_matmul_precision("highest")
     torch.backends.cuda.matmul.allow_tf32 = False
@@ -69,11 +70,14 @@ def _run_epoch(model, loader, cfg, beta, optimizer=None):
         target_kind = cfg.training_target if is_train else cfg.validation_target
         if target_kind == "clean" and not paired:
             raise ValueError("Clean reconstruction requires paired input/target batches")
+    
         if paired and len(batch) != 2:
             raise ValueError("Expected an input/target pair")
+  
         x, target = (batch[0].to(cfg.device), batch[1].to(cfg.device)) if paired else (batch.to(cfg.device), batch.to(cfg.device))
         if x.shape != target.shape or not torch.isfinite(x).all() or not torch.isfinite(target).all():
             raise FloatingPointError(f"Invalid input/target in batch {index}")
+   
         with torch.set_grad_enabled(is_train):
             if is_train and cfg.teacher_forcing:
                 x_hat, _, mu, logvar = model(x, use_teacher_forcing=True)
@@ -81,19 +85,24 @@ def _run_epoch(model, loader, cfg, beta, optimizer=None):
                 x_hat, _, mu, logvar = model(x)
             loss, parts = compute_loss(x_hat, target, mu, logvar, model.variational, cfg.recon_loss, beta)
             parts["endpoint_mae"] = (x_hat[:, -1]-target[:, -1]).abs().mean().item()
+   
         if not torch.isfinite(loss):
             raise FloatingPointError(f"Nonfinite loss in batch {index}; inspect inputs and logvar")
+   
         if is_train:
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip_norm or float("inf"),
                                           error_if_nonfinite=True)
             optimizer.step()
+   
         n_samples += len(x)
         for key in totals:
             totals[key] += parts[key] * len(x)
+ 
     if not n_samples:
         raise ValueError("Empty loader: no samples processed")
+  
     return {key: value / n_samples for key, value in totals.items()}
 
 
@@ -108,13 +117,14 @@ def train_model(model, train_loader, val_loader, cfg, verbose=True):
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     annealer = KLAnnealer(cfg.beta_target, cfg.kl_anneal_epochs)
     stopper = EarlyStopping(cfg.early_stopping_patience, cfg.early_stopping_min_delta)
+   
     history, best_state, best_val = History(), None, float("inf")
     for epoch in range(cfg.epochs):
         start = time.perf_counter()
         beta = annealer.beta(epoch) if model.variational else 0.
         train = _run_epoch(model, train_loader, cfg, beta, optimizer)
         val = _run_epoch(model, val_loader, cfg, beta)
-        # Deterministic reconstruction at mu, NOT a Monte Carlo ELBO estimate.
+        # Реконструкция по mu без случайного сэмплирования; это не оценка ELBO.
         score = (val["endpoint_mae"] if cfg.selection_metric == "endpoint_mae" else
                  val["recon"] + (cfg.beta_target * val["kl"] if cfg.selection_metric == "fixed_beta" else 0.))
         for key, value in (("train_loss", train["loss"]), ("val_loss", val["loss"]),
@@ -122,17 +132,22 @@ def train_model(model, train_loader, val_loader, cfg, verbose=True):
                            ("val_kl", val["kl"]), ("beta", beta), ("selection_loss", score),
                            ("epoch_time_sec", time.perf_counter()-start)):
             getattr(history, key).append(value)
+    
         eligible = not model.variational or epoch >= cfg.kl_anneal_epochs
         if eligible and score < best_val:
             best_val = score
             best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
             history.best_epoch, history.best_beta, history.best_score = epoch+1, beta, score
+   
         if verbose:
             print(f"epoch {epoch+1}/{cfg.epochs} train={train['loss']:.5f} val_recon={val['recon']:.5f} "
                   f"KL={val['kl']:.5f} beta={beta:.4g} selection={score:.5f}", flush=True)
+   
         if eligible and stopper.should_stop(score):
             break
+   
     if best_state is None:
         raise RuntimeError("No eligible checkpoint")
+ 
     model.load_state_dict(best_state)
     return history

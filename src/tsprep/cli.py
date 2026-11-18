@@ -1,4 +1,4 @@
-"""Command line entry point for immutable experiments and evaluation."""
+"""Обучение одной модели и оценка сохранённых весов из командной строки."""
 import argparse
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,7 +26,7 @@ def main():
     parser.add_argument("--loader-seed", type=int, help="Defaults to model seed")
     parser.add_argument("--deterministic", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--allow-source-mismatch", action="store_true",
-                        help="Explicit historical reevaluation; does not enable study resume")
+                        help="Разрешить оценку модели с другой версией исходников")
     parser.add_argument("--beta", type=float, default=.01)
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--training-target", choices=["observed", "clean"], default="observed")
@@ -36,8 +36,8 @@ def main():
     parser.add_argument("--length", type=int, default=3000)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--threads", type=int, default=2)
-    parser.add_argument("--out", help="New experiment directory, not a JSON filename")
-    parser.add_argument("--evaluate", help="Evaluate an existing v2 artifact without refitting preprocessing")
+    parser.add_argument("--out", help="Новая папка результатов")
+    parser.add_argument("--evaluate", help="Оценить модель из сохранённой папки")
     args = parser.parse_args()
     torch.set_num_threads(args.threads)
     if args.evaluate:
@@ -45,6 +45,7 @@ def main():
         import json
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
+   
     if args.data == "synthetic":
         s = generate_series(length=args.length, seed=args.data_seed)
         raw, regime, anomaly, clean = s.values, s.regime, s.is_anomaly, s.clean_values
@@ -52,11 +53,14 @@ def main():
     else:
         if not args.csv_path or not args.columns:
             parser.error("CSV experiments require --csv-path and --columns")
+      
         quality = csv_quality_report(args.csv_path)
         if quality["needs_review"]:
             parser.error("CSV quality checks failed; inspect tsprep.data_preprocessing.quality.csv_quality_report")
+    
         dates, raw, names = load_csv_series_with_dates(args.csv_path, value_cols=args.columns)
         regime = anomaly = clean = None
+  
     exp = ExperimentConfig(DataConfig(window_len=args.window_len, stride=args.stride, n_features=raw.shape[1],
         forecast_horizon=args.horizon, log_transform=args.log_transform,
         seed=args.seed if args.loader_seed is None else args.loader_seed),
@@ -65,6 +69,7 @@ def main():
                     seed=args.seed, device=args.device, deterministic=args.deterministic,
                     training_target=args.training_target, validation_target=args.validation_target,
                     selection_metric=args.selection_metric))
+  
     out = args.out or str(Path("results")/datetime.now(timezone.utc).strftime("run_%Y%m%dT%H%M%S%fZ"))
     result = train_experiment(exp, raw, output_dir=out, regime=regime, is_anomaly=anomaly, dates=dates,
                              feature_names=names, clean_raw=clean,

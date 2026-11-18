@@ -1,7 +1,6 @@
-# Runtime requirements; exact rerun versions are in results/<study>/environment.txt.
 torch>=2.2
 numpy>=1.26
 pandas>=2.0
 scikit-learn>=1.4
 matplotlib>=3.8
-# Optional tools: pip install -e ".[dev,download,notebook]"
+# Дополнительные инструменты: pip install -e ".[dev,download,notebook]"
